@@ -732,13 +732,13 @@ namespace VirtualClient.Contracts
 
             try
             {
-                Environment.SetEnvironmentVariable("VC_DOCKER_PLATFORM", "Unix");
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PLATFORM, "Unix");
 
                 Assert.AreEqual(PlatformID.Unix, component.Platform);
             }
             finally
             {
-                Environment.SetEnvironmentVariable("VC_DOCKER_PLATFORM", null);
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PLATFORM, null);
             }
         }
 
@@ -748,7 +748,7 @@ namespace VirtualClient.Contracts
             this.mockFixture.Setup(PlatformID.Win32NT, System.Runtime.InteropServices.Architecture.X64);
             TestVirtualClientComponent component = new TestVirtualClientComponent(this.mockFixture.Dependencies, this.mockFixture.Parameters);
 
-            Environment.SetEnvironmentVariable("VC_DOCKER_PLATFORM", null);
+            Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PLATFORM, null);
 
             Assert.AreEqual(PlatformID.Win32NT, component.Platform);
         }
@@ -761,13 +761,13 @@ namespace VirtualClient.Contracts
 
             try
             {
-                Environment.SetEnvironmentVariable("VC_DOCKER_ARCH", "Arm64");
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_ARCH, "Arm64");
 
                 Assert.AreEqual(System.Runtime.InteropServices.Architecture.Arm64, component.CpuArchitecture);
             }
             finally
             {
-                Environment.SetEnvironmentVariable("VC_DOCKER_ARCH", null);
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_ARCH, null);
             }
         }
 
@@ -780,16 +780,16 @@ namespace VirtualClient.Contracts
 
             try
             {
-                Environment.SetEnvironmentVariable("VC_DOCKER_PLATFORM", "Unix");
-                Environment.SetEnvironmentVariable("VC_DOCKER_ARCH", "X64");
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PLATFORM, "Unix");
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_ARCH, "X64");
 
                 // linux-x64 is in [SupportedPlatforms("linux-x64,win-arm64,win-x64")]
                 Assert.IsTrue(component.IsSupported());
             }
             finally
             {
-                Environment.SetEnvironmentVariable("VC_DOCKER_PLATFORM", null);
-                Environment.SetEnvironmentVariable("VC_DOCKER_ARCH", null);
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PLATFORM, null);
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_ARCH, null);
             }
         }
 

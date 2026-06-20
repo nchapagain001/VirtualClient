@@ -17,12 +17,14 @@ namespace VirtualClient.Actions
 
     /// <summary>
     /// Executes child components within a Docker container environment.
+    /// Component code runs on host, but all processes route to the container via DockerProcessManager.
     /// </summary>
     [SupportedPlatforms("linux-x64,linux-arm64")]
     internal class DockerExecution : VirtualClientComponentCollection
     {
         private ISystemManagement systemManager;
         private DockerContainerClient dockerClient;
+        private string createdContainerId;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="DockerExecution"/> class.
@@ -34,6 +36,7 @@ namespace VirtualClient.Actions
         {
             this.systemManager = dependencies.GetService<ISystemManagement>();
             this.dockerClient = new DockerContainerClient(this.Logger);
+            this.createdContainerId = null;
         }
 
         /// <summary>
@@ -86,59 +89,34 @@ namespace VirtualClient.Actions
                 throw new ArgumentException("DockerExecution must contain at least one child component.");
             }
 
-            this.Logger?.LogInformation(
-                $"DockerExecution: Initializing container execution. Image={this.Image}, Components={this.Count}");
-
             return base.InitializeAsync(telemetryContext, cancellationToken);
         }
 
         /// <summary>
-        /// Executes child components within the Docker container via docker exec.
+        /// Executes child components with their processes routed to the Docker container.
         /// </summary>
         protected override async Task ExecuteAsync(EventContext telemetryContext, CancellationToken cancellationToken)
         {
-            this.Logger?.LogInformation(
-                $"DockerExecution: Starting container execution. Image={this.Image}");
-
-            // Get container ID from environment (set by DockerCommand)
-            string containerId = Environment.GetEnvironmentVariable("VC_DOCKER_CONTAINER_ID");
+            // Check if container already exists (set by DockerCommand)
+            string containerId = Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_CONTAINER_ID);
 
             if (string.IsNullOrWhiteSpace(containerId))
             {
-                this.Logger?.LogWarning(
-                    "DockerExecution: No container ID found. Executing components on host (non-container mode).");
-
-                // Fallback: execute on host if no container context
-                await this.ExecuteComponentsOnHostAsync(cancellationToken).ConfigureAwait(false);
-            }
-            else
-            {
-                // Execute components inside container via docker exec
-                await this.ExecuteComponentsInContainerAsync(containerId, cancellationToken).ConfigureAwait(false);
+                // Create a new container for this execution
+                containerId = await this.CreateAndSetupContainerAsync(cancellationToken).ConfigureAwait(false);
+                this.createdContainerId = containerId;
             }
 
-            this.Logger?.LogInformation($"DockerExecution: Container execution completed.");
-        }
+            // Wrap ProcessManager with DockerProcessManager so child components' processes route to container
+            ProcessManager currentProcessManager = this.Dependencies.GetService<ProcessManager>();
+            ProcessManager wrappedProcessManager = new DockerProcessManager(currentProcessManager);
 
-        /// <summary>
-        /// Cleans up Docker container resources.
-        /// </summary>
-        protected override Task CleanupAsync(EventContext telemetryContext, CancellationToken cancellationToken)
-        {
-            this.Logger?.LogInformation($"DockerExecution: Cleaning up container resources.");
-            return base.CleanupAsync(telemetryContext, cancellationToken);
-        }
+            // Replace ProcessManager in dependencies with the wrapped version
+            this.Dependencies.AddSingleton<ProcessManager>(wrappedProcessManager);
 
-        /// <summary>
-        /// Executes components on the host (fallback mode).
-        /// </summary>
-        private async Task ExecuteComponentsOnHostAsync(CancellationToken cancellationToken)
-        {
+            // Execute child components (their process calls will route to container via DockerProcessManager)
             foreach (VirtualClientComponent component in this)
             {
-                this.Logger?.LogInformation(
-                    $"DockerExecution: Executing child component on host. Component={component.GetType().Name}");
-
                 await component.ExecuteAsync(cancellationToken).ConfigureAwait(false);
 
                 if (cancellationToken.IsCancellationRequested)
@@ -149,62 +127,81 @@ namespace VirtualClient.Actions
         }
 
         /// <summary>
-        /// Executes components inside the Docker container.
+        /// Cleans up Docker container resources.
         /// </summary>
-        private async Task ExecuteComponentsInContainerAsync(string containerId, CancellationToken cancellationToken)
+        protected override async Task CleanupAsync(EventContext telemetryContext, CancellationToken cancellationToken)
         {
-            foreach (VirtualClientComponent component in this)
+            // Stop and remove container if we created it (don't cleanup if it was created by DockerCommand)
+            if (!string.IsNullOrWhiteSpace(this.createdContainerId))
             {
-                string componentName = component.GetType().Name;
-                this.Logger?.LogInformation(
-                    $"DockerExecution: Executing child component in container. Component={componentName}, Container={containerId}");
-
                 try
                 {
-                    // Build command to execute component in container
-                    // Note: For MVP, we execute components individually
-                    // Full implementation would handle parameters and profiles
-                    string command = $"/app/VirtualClient.Main --component={componentName}";
-
-                    this.Logger?.LogInformation($"DockerExecution: Running docker exec: {command}");
-
-                    var execResult = await this.dockerClient.ExecuteInContainerAsync(
-                        containerId,
-                        command,
-                        cancellationToken).ConfigureAwait(false);
-
-                    // Capture output for logging and telemetry
-                    if (!execResult.Success)
-                    {
-                        this.Logger?.LogError(
-                            $"DockerExecution: Component execution failed in container. " +
-                            $"Component={componentName}, ExitCode={execResult.ExitCode}, " +
-                            $"Error={execResult.StandardError}");
-
-                        // Emit telemetry event for error
-                        this.Logger?.LogError($"Container Error Output: {execResult.StandardError}");
-
-                        throw new InvalidOperationException(
-                            $"Component {componentName} failed inside container. Exit code: {execResult.ExitCode}. " +
-                            $"Error: {execResult.StandardError}");
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(execResult.StandardOutput))
-                    {
-                        this.Logger?.LogInformation($"Container Output: {execResult.StandardOutput}");
-                    }
+                    await this.dockerClient.StopContainerAsync(this.createdContainerId, cancellationToken).ConfigureAwait(false);
+                    await this.dockerClient.RemoveContainerAsync(this.createdContainerId, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
-                    this.Logger?.LogError($"Exception executing component in container: {ex.Message}");
-                    throw;
-                }
-
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    break;
+                    this.Logger?.LogWarning($"Failed to cleanup Docker container {this.createdContainerId}: {ex.Message}");
                 }
             }
+
+            await base.CleanupAsync(telemetryContext, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Creates a Docker container and sets up environment for process routing.
+        /// </summary>
+        private async Task<string> CreateAndSetupContainerAsync(CancellationToken cancellationToken)
+        {
+            // Check if image exists, build if needed
+            bool imageExists = await this.dockerClient.ImageExistsAsync(this.Image, cancellationToken).ConfigureAwait(false);
+            if (!imageExists)
+            {
+                this.Logger?.LogWarning($"Docker image '{this.Image}' not found locally. Building...");
+                // Note: Building from Dockerfile would require additional logic similar to DockerCommand
+                throw new InvalidOperationException(
+                    $"Docker image '{this.Image}' not found. Pre-build the image or use DockerCommand subcommand.");
+            }
+
+            // Parse volume mounts if provided
+            Dictionary<string, string> volumeMounts = new Dictionary<string, string>();
+            if (!string.IsNullOrWhiteSpace(this.VolumeMounts))
+            {
+                foreach (string mount in this.VolumeMounts.Split(','))
+                {
+                    string[] parts = mount.Trim().Split(':');
+                    if (parts.Length == 2)
+                    {
+                        volumeMounts[parts[0]] = parts[1];
+                    }
+                }
+            }
+
+            // Parse environment variables if provided
+            Dictionary<string, string> envVars = new Dictionary<string, string>();
+            if (!string.IsNullOrWhiteSpace(this.EnvironmentVariables))
+            {
+                foreach (string envPair in this.EnvironmentVariables.Split(','))
+                {
+                    string[] parts = envPair.Trim().Split('=');
+                    if (parts.Length == 2)
+                    {
+                        envVars[parts[0]] = parts[1];
+                    }
+                }
+            }
+
+            // Create container
+            string containerId = await this.dockerClient.CreateContainerAsync(
+                this.Image,
+                volumeMounts,
+                envVars,
+                cancellationToken).ConfigureAwait(false);
+
+            // Set environment variable for child components to route processes to container
+            Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_CONTAINER_ID, containerId);
+
+            return containerId;
         }
     }
 }

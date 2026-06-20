@@ -197,7 +197,7 @@ namespace VirtualClient.Contracts
         {
             get
             {
-                string envArch = Environment.GetEnvironmentVariable("VC_DOCKER_ARCH");
+                string envArch = Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_ARCH);
                 if (!string.IsNullOrEmpty(envArch) && Enum.TryParse<Architecture>(envArch, out Architecture containerArch))
                 {
                     return containerArch;
@@ -460,7 +460,7 @@ namespace VirtualClient.Contracts
         {
             get
             {
-                string envPlatform = Environment.GetEnvironmentVariable("VC_DOCKER_PLATFORM");
+                string envPlatform = Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PLATFORM);
                 if (!string.IsNullOrEmpty(envPlatform) && Enum.TryParse<PlatformID>(envPlatform, out PlatformID containerPlatform))
                 {
                     return containerPlatform;

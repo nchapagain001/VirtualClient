@@ -8,13 +8,41 @@
     "Parameters": {
         "DockerVersion": ""
     },
-    "Dependencies": [
-        {
-            "Type": "DockerInstallation",
-            "Parameters": {
-                "Scenario": "InstallDocker",
-                "Version": "$.Parameters.DockerVersion"
-            }
-        }
-    ]
+  "Dependencies": [
+    {
+      "Type": "DockerInstallation",
+      "Parameters": {
+        "Scenario": "InstallDocker",
+        "Version": "$.Parameters.DockerVersion"
+      }
+    },
+    {
+      "Type": "ExecuteCommand",
+      "Parameters": {
+        "Scenario": "AddUserToDockerGroup",
+        "Command": "sudo usermod -aG docker $(whoami)"
+      }
+    },
+    {
+      "Type": "ExecuteCommand",
+      "Parameters": {
+        "Scenario": "StartDocker",
+        "Command": "sudo systemctl start docker"
+      }
+    },
+    {
+      "Type": "ExecuteCommand",
+      "Parameters": {
+        "Scenario": "EnableDocker",
+        "Command": "sudo systemctl enable docker"
+      }
+    },
+    {
+      "Type": "ExecuteCommand",
+      "Parameters": {
+        "Scenario": "VerifyDockerSetup",
+        "Command": "sudo docker version"
+      }
+    }
+  ]
 }

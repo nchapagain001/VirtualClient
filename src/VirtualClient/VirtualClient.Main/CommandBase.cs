@@ -808,9 +808,24 @@ namespace VirtualClient
 
             // Ensure the core/fundamental directories exist.
             this.CreateCoreDirectories(platformSpecifics, systemManagement.FileSystem);
-            
+
             IServiceCollection dependencies = new ServiceCollection();
-            dependencies.AddSingleton<PlatformSpecifics>(platformSpecifics);
+
+            PlatformSpecifics effectivePlatformSpecifics = platformSpecifics;
+            if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_CONTAINER_ID)))
+            {
+                effectivePlatformSpecifics = new DockerAwarePlatformSpecifics(platformSpecifics);
+            }
+
+            // Register ProcessManager with Docker wrapper if running in container context
+            ProcessManager processManager = systemManagement.ProcessManager;
+            if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_CONTAINER_ID)))
+            {
+                processManager = new DockerProcessManager(processManager);
+            }
+                        
+            dependencies.AddSingleton<PlatformSpecifics>(effectivePlatformSpecifics);
+            dependencies.AddSingleton<ProcessManager>(processManager);
             dependencies.AddSingleton<IApiManager>(apiManager);
             dependencies.AddSingleton<IApiClientManager>(apiClientManager);
             dependencies.AddSingleton<IAuthorizationManager>(authorizationManager);
@@ -826,7 +841,6 @@ namespace VirtualClient
             dependencies.AddSingleton<IStateManager>(systemManagement.StateManager);
             dependencies.AddSingleton<ISystemInfo>(systemManagement);
             dependencies.AddSingleton<ISystemManagement>(systemManagement);
-            dependencies.AddSingleton<ProcessManager>(systemManagement.ProcessManager);
 
             IEnumerable<IBlobManager> blobStores = this.InitializeBlobStoreManagers(platformSpecifics, apiClientManager, certificateManager);
             dependencies.AddSingleton<IEnumerable<IBlobManager>>(blobStores);
