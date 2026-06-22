@@ -15,30 +15,6 @@
         "Scenario": "InstallDocker",
         "Version": "$.Parameters.DockerVersion"
       }
-    },
-    {
-      "Type": "ExecuteCommand",
-      "Parameters": {
-        "Scenario": "AddUserToDockerGroup",
-        "Command": "sudo usermod -aG docker $(whoami)",
-        "SupportedPlatforms": "linux-x64,linux-arm64"
-      }
-    },
-    {
-      "Type": "ExecuteCommand",
-      "Parameters": {
-        "Scenario": "StartDocker",
-        "Command": "sudo systemctl start docker",
-        "SupportedPlatforms": "linux-x64,linux-arm64"
-      }
-    },
-    {
-      "Type": "ExecuteCommand",
-      "Parameters": {
-        "Scenario": "VerifyDockerInstallation",
-        "Command": "docker version",
-        "UseShell": true
-      }
     }
   ]
 }

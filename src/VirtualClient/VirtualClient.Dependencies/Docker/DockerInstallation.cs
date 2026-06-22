@@ -74,7 +74,7 @@ namespace VirtualClient.Dependencies
             {
                 if (this.dockerScriptPath == null)
                 {
-                    this.dockerScriptPath = Path.Combine(this.PlatformSpecifics.ScriptsDirectory, "Docker");
+                    this.dockerScriptPath = Path.Combine(this.PlatformSpecifics.ScriptsDirectory, "docker");
 
                     if (!Directory.Exists(this.dockerScriptPath))
                     {
@@ -114,45 +114,50 @@ namespace VirtualClient.Dependencies
         /// <returns></returns>
         protected override async Task ExecuteAsync(EventContext telemetryContext, CancellationToken cancellationToken)
         {
-            if (this.GetStateValue(DockerAlreadyInstalledStateKey) == "True")
+            try
             {
-                return;
-            }
-
-            if (this.Platform == PlatformID.Unix)
-            {
-                LinuxDistributionInfo distroInfo = await this.systemManager.GetLinuxDistributionAsync(cancellationToken)
-                    .ConfigureAwait(false);
-
-                switch (distroInfo.LinuxDistribution)
+                if (this.GetStateValue(DockerAlreadyInstalledStateKey) == "True")
                 {
-                    case LinuxDistribution.Ubuntu:
-                    case LinuxDistribution.Debian:
-                        await this.InstallDockerOnDebianBasedAsync(telemetryContext, cancellationToken)
-                            .ConfigureAwait(false);
-                        break;
+                    return;
+                }
 
-                    case LinuxDistribution.CentOS7:
-                    case LinuxDistribution.CentOS8:
-                    case LinuxDistribution.RHEL7:
-                    case LinuxDistribution.RHEL8:
-                        await this.InstallDockerOnRHELBasedAsync(telemetryContext, cancellationToken)
-                            .ConfigureAwait(false);
-                        break;
+                if (this.Platform == PlatformID.Unix)
+                {
+                    LinuxDistributionInfo distroInfo = await this.systemManager.GetLinuxDistributionAsync(cancellationToken)
+                        .ConfigureAwait(false);
 
-                    default:
-                        throw new WorkloadException(
-                            $"Docker installation is not supported on the current Linux distro: {distroInfo.LinuxDistribution}. " +
-                            $"Supported distros: Ubuntu, Debian, CentOS7, CentOS8, RHEL7, RHEL8.",
-                            ErrorReason.LinuxDistributionNotSupported);
+                    switch (distroInfo.LinuxDistribution)
+                    {
+                        case LinuxDistribution.Ubuntu:
+                        case LinuxDistribution.Debian:
+                            await this.InstallDockerOnDebianBasedAsync(telemetryContext, cancellationToken)
+                                .ConfigureAwait(false);
+                            break;
+
+                        case LinuxDistribution.CentOS7:
+                        case LinuxDistribution.CentOS8:
+                        case LinuxDistribution.RHEL7:
+                        case LinuxDistribution.RHEL8:
+                            await this.InstallDockerOnRHELBasedAsync(telemetryContext, cancellationToken)
+                                .ConfigureAwait(false);
+                            break;
+
+                        default:
+                            throw new WorkloadException(
+                                $"Docker installation is not supported on the current Linux distro: {distroInfo.LinuxDistribution}. " +
+                                $"Supported distros: Ubuntu, Debian, CentOS7, CentOS8, RHEL7, RHEL8.",
+                                ErrorReason.LinuxDistributionNotSupported);
+                    }
+                }
+                else if (this.Platform == PlatformID.Win32NT)
+                {
+                    await this.InstallDockerOnWindowsAsync(telemetryContext, cancellationToken).ConfigureAwait(false);
                 }
             }
-            else if (this.Platform == PlatformID.Win32NT)
+            finally
             {
-                await this.InstallDockerOnWindowsAsync(telemetryContext, cancellationToken).ConfigureAwait(false);
+                await this.VerifyDockerAsync(telemetryContext, cancellationToken).ConfigureAwait(false);
             }
-
-            await this.VerifyDockerAsync(telemetryContext, cancellationToken).ConfigureAwait(false);
         }
 
         private async Task<bool> IsHyperVEnabledAsync(CancellationToken cancellationToken)
@@ -346,7 +351,11 @@ namespace VirtualClient.Dependencies
         {
             try
             {
-                using (IProcessProxy process = this.systemManager.ProcessManager.CreateProcess("docker", "version"))
+                using (IProcessProxy process = this.systemManager.ProcessManager.CreateElevatedProcess(
+                    this.Platform,
+                    "docker",
+                    "version",
+                    null))
                 {
                     await process.StartAndWaitAsync(cancellationToken).ConfigureAwait(false);
 
@@ -356,6 +365,8 @@ namespace VirtualClient.Dependencies
                             "Docker verification failed.",
                             ErrorReason.DependencyInstallationFailed);
                     }
+
+                    this.Logger?.LogTrace(process.StandardOutput.ToString());
                 }
             }
             catch (Exception ex)
