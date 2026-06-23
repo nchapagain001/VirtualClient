@@ -101,7 +101,8 @@ namespace VirtualClient.Dependencies
 
             if (isDockerInstalled)
             {
-                this.SetStateValue(DockerAlreadyInstalledStateKey, "True");
+                await this.SetStateValueAsync(DockerAlreadyInstalledStateKey, "True", cancellationToken)
+                    .ConfigureAwait(false);
                 return;
             }
         }
@@ -116,7 +117,10 @@ namespace VirtualClient.Dependencies
         {
             try
             {
-                if (this.GetStateValue(DockerAlreadyInstalledStateKey) == "True")
+                string alreadyInstalled = await this.GetStateValueAsync(DockerAlreadyInstalledStateKey, cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (alreadyInstalled == "True")
                 {
                     return;
                 }
@@ -191,8 +195,9 @@ namespace VirtualClient.Dependencies
 
                 return false;
             }
-            catch
+            catch (Exception ex)
             {
+                this.Logger?.LogWarning($"Docker installation check failed: {ex.Message}");
                 return false;
             }
         }
@@ -206,7 +211,8 @@ namespace VirtualClient.Dependencies
                 return;
             }
 
-            string restartedState = this.GetStateValue(DockerRestartedStateKey);
+            string restartedState = await this.GetStateValueAsync(DockerRestartedStateKey, cancellationToken)
+                .ConfigureAwait(false);
 
             if (restartedState != "True")
             {
@@ -215,7 +221,7 @@ namespace VirtualClient.Dependencies
                 if (!isHyperVEnabled)
                 {
                     await this.CallPowerShell(Path.Combine(this.DockerScriptPath, "enable-hyperv.ps1"), telemetryContext, cancellationToken).ConfigureAwait(false);
-                    this.SetStateValue(DockerRestartedStateKey, "True");
+                    await this.SetStateValueAsync(DockerRestartedStateKey, "True", cancellationToken).ConfigureAwait(false);
                     this.RequestReboot();
                     return;
                 }
@@ -335,8 +341,9 @@ namespace VirtualClient.Dependencies
                     return process.ExitCode;
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                this.Logger?.LogWarning($"PowerShell script execution failed ({scriptPath}): {ex.Message}");
                 return -1;
             }
         }
@@ -377,40 +384,56 @@ namespace VirtualClient.Dependencies
             }
         }
 
-        private string GetStateValue(string key)
+        private async Task<string> GetStateValueAsync(string key, CancellationToken cancellationToken)
         {
             try
             {
-                State state = this.stateManager?.GetStateAsync<State>(this.TypeName, CancellationToken.None)
-                    .GetAwaiter().GetResult();
+                State state = await this.stateManager.GetStateAsync<State>(this.TypeName, cancellationToken)
+                    .ConfigureAwait(false);
 
                 if (state?.Properties.TryGetValue(key, out IConvertible value) == true)
                 {
                     return value?.ToString();
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // State may not exist yet
+                this.Logger?.LogWarning($"Failed to read state key '{key}': {ex.Message}");
             }
 
             return null;
         }
 
         /// <summary>
-        /// Sets a state value for the Docker installation process.
+        /// Sets a state value for the Docker installation process, preserving existing keys.
         /// </summary>
-        private void SetStateValue(string key, string value)
+        private async Task SetStateValueAsync(string key, string value, CancellationToken cancellationToken)
         {
-            State state = new State(new Dictionary<string, IConvertible>
-            {
-                { key, value }
-            });
+            IDictionary<string, IConvertible> properties = new Dictionary<string, IConvertible>();
 
-            this.stateManager?.SaveStateAsync(
-                this.TypeName,
-                state,
-                CancellationToken.None).GetAwaiter().GetResult();
+            try
+            {
+                State existingState = await this.stateManager.GetStateAsync<State>(this.TypeName, cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (existingState?.Properties != null)
+                {
+                    foreach (KeyValuePair<string, IConvertible> kvp in existingState.Properties)
+                    {
+                        properties[kvp.Key] = kvp.Value;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                this.Logger?.LogWarning($"Failed to read existing state before setting key '{key}': {ex.Message}");
+            }
+
+            properties[key] = value;
+
+            State state = new State(properties);
+            await this.stateManager.SaveStateAsync(this.TypeName, state, cancellationToken)
+                .ConfigureAwait(false);
         }
     }
 }

@@ -6,8 +6,6 @@ namespace VirtualClient.Common.Docker
     using System;
     using System.Collections.Generic;
     using System.Diagnostics;
-    using System.IO;
-    using System.Linq;
     using System.Runtime.InteropServices;
     using System.Text;
     using System.Text.Json.Nodes;
@@ -95,7 +93,7 @@ namespace VirtualClient.Common.Docker
             string imageName,
             CancellationToken cancellationToken)
         {
-            DockerCommandResult result = await this.ExecuteDockerCommandAsync($"image inspect {imageName}", null, cancellationToken).ConfigureAwait(false);
+            this.logger?.LogInformation($"Inspecting Docker image platform: {imageName}");
 
             if (result.ExitCode != 0)
             {
@@ -194,7 +192,9 @@ namespace VirtualClient.Common.Docker
             arguments.Add("/dev/null");
 
             string argumentsString = string.Join(" ", arguments);
-            DockerCommandResult result = await this.ExecuteDockerCommandAsync(argumentsString, null, cancellationToken).ConfigureAwait(false);
+            this.logger?.LogInformation($"Creating Docker container: docker {argumentsString}");
+
+            var result = await this.ExecuteDockerCommandAsync(argumentsString, null, cancellationToken).ConfigureAwait(false);
 
             if (result.ExitCode != 0)
             {
@@ -208,6 +208,7 @@ namespace VirtualClient.Common.Docker
                 throw new InvalidOperationException("Docker container creation succeeded but no container ID was returned.");
             }
 
+            this.logger?.LogInformation($"Docker container created successfully. Container ID: {containerId}");
             return containerId;
         }
 
@@ -221,7 +222,7 @@ namespace VirtualClient.Common.Docker
         {
             string arguments = $"exec {containerId} {command}";
 
-            DockerCommandResult result = await this.ExecuteDockerCommandAsync(arguments, null, cancellationToken).ConfigureAwait(false);
+            this.logger?.LogInformation($"Executing command in container {containerId}: {command}");
 
             return new DockerExecResult
             {
@@ -239,7 +240,8 @@ namespace VirtualClient.Common.Docker
         {
             try
             {
-                DockerCommandResult result = await this.ExecuteDockerCommandAsync($"stop {containerId}", null, cancellationToken).ConfigureAwait(false);
+                this.logger?.LogInformation($"Stopping Docker container: {containerId}");
+                var result = await this.ExecuteDockerCommandAsync($"stop {containerId}", null, cancellationToken).ConfigureAwait(false);
                 return result.ExitCode == 0;
             }
             catch (Exception ex)
@@ -256,7 +258,8 @@ namespace VirtualClient.Common.Docker
         {
             try
             {
-                DockerCommandResult result = await this.ExecuteDockerCommandAsync($"rm {containerId}", null, cancellationToken).ConfigureAwait(false);
+                this.logger?.LogInformation($"Removing Docker container: {containerId}");
+                var result = await this.ExecuteDockerCommandAsync($"rm {containerId}", null, cancellationToken).ConfigureAwait(false);
                 return result.ExitCode == 0;
             }
             catch (Exception ex)

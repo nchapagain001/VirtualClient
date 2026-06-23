@@ -80,13 +80,17 @@ namespace VirtualClient.Actions
             // Validate Docker image is specified
             if (string.IsNullOrWhiteSpace(this.Image))
             {
-                throw new ArgumentException("Docker image (Image parameter) is required for DockerExecution.");
+                throw new WorkloadException(
+                    "Docker image (Image parameter) is required for DockerExecution.",
+                    ErrorReason.InvalidProfileDefinition);
             }
 
             // Validate that at least one child component is defined
             if (this.Count == 0)
             {
-                throw new ArgumentException("DockerExecution must contain at least one child component.");
+                throw new WorkloadException(
+                    "DockerExecution must contain at least one child component.",
+                    ErrorReason.InvalidProfileDefinition);
             }
 
             return base.InitializeAsync(telemetryContext, cancellationToken);
@@ -136,32 +140,30 @@ namespace VirtualClient.Actions
             {
                 try
                 {
-                    await this.dockerClient.StopContainerAsync(this.createdContainerId, cancellationToken).ConfigureAwait(false);
-                    await this.dockerClient.RemoveContainerAsync(this.createdContainerId, cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    this.Logger?.LogWarning($"Failed to cleanup Docker container {this.createdContainerId}: {ex.Message}");
-                }
-            }
+                    // Execute the component's profile action inside the container via docker exec.
+                    // The VirtualClient binary is expected to be volume-mounted at /app.
+                    string command = $"/app/VirtualClient --profile=/app/profiles/{componentName}.json";
 
-            await base.CleanupAsync(telemetryContext, cancellationToken).ConfigureAwait(false);
-        }
+                    this.Logger?.LogInformation($"DockerExecution: Running docker exec: {command}");
 
-        /// <summary>
-        /// Creates a Docker container and sets up environment for process routing.
-        /// </summary>
-        private async Task<string> CreateAndSetupContainerAsync(CancellationToken cancellationToken)
-        {
-            // Check if image exists, build if needed
-            bool imageExists = await this.dockerClient.ImageExistsAsync(this.Image, cancellationToken).ConfigureAwait(false);
-            if (!imageExists)
-            {
-                this.Logger?.LogWarning($"Docker image '{this.Image}' not found locally. Building...");
-                // Note: Building from Dockerfile would require additional logic similar to DockerCommand
-                throw new InvalidOperationException(
-                    $"Docker image '{this.Image}' not found. Pre-build the image or use DockerCommand subcommand.");
-            }
+                    DockerExecResult execResult = await this.dockerClient.ExecuteInContainerAsync(
+                        containerId,
+                        command,
+                        cancellationToken).ConfigureAwait(false);
+
+                    // Capture output for logging and telemetry
+                    if (!execResult.Success)
+                    {
+                        this.Logger?.LogError(
+                            $"DockerExecution: Component execution failed in container. " +
+                            $"Component={componentName}, ExitCode={execResult.ExitCode}, " +
+                            $"Error={execResult.StandardError}");
+
+                        throw new WorkloadException(
+                            $"Component {componentName} failed inside container. Exit code: {execResult.ExitCode}. " +
+                            $"Error: {execResult.StandardError}",
+                            ErrorReason.WorkloadFailed);
+                    }
 
             // Parse volume mounts if provided
             Dictionary<string, string> volumeMounts = new Dictionary<string, string>();
@@ -174,6 +176,10 @@ namespace VirtualClient.Actions
                     {
                         volumeMounts[parts[0]] = parts[1];
                     }
+                }
+                catch (WorkloadException)
+                {
+                    throw;
                 }
             }
 
