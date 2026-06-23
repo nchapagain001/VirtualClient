@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-sudo systemctl enable docker
-sudo systemctl start docker
+systemctl enable docker
+systemctl start docker
 
 # Wait for Docker daemon to be ready (up to 30 seconds)
 for i in {1..30}; do

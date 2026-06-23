@@ -6,7 +6,6 @@ namespace VirtualClient.Common.Docker
     using System;
     using System.Collections.Generic;
     using System.Diagnostics;
-    using System.Linq;
     using System.Runtime.InteropServices;
     using System.Text;
     using System.Text.Json.Nodes;
@@ -55,7 +54,7 @@ namespace VirtualClient.Common.Docker
             string imageName,
             CancellationToken cancellationToken)
         {
-            this.LogDocker($"Inspecting Docker image platform: {imageName}");
+            this.logger?.LogInformation($"Inspecting Docker image platform: {imageName}");
 
             var result = await this.ExecuteDockerCommandAsync($"image inspect {imageName}", null, cancellationToken).ConfigureAwait(false);
 
@@ -155,10 +154,10 @@ namespace VirtualClient.Common.Docker
             arguments.Add("-f");
             arguments.Add("/dev/null");
 
-            var argumentsString = string.Join(" ", arguments.Select(a => $"\"{a}\""));
-            this.LogDocker($"Creating Docker container: docker {argumentsString}");
+            string argumentsString = string.Join(" ", arguments);
+            this.logger?.LogInformation($"Creating Docker container: docker {argumentsString}");
 
-            var result = await this.ExecuteDockerCommandAsync(string.Join(" ", arguments), null, cancellationToken).ConfigureAwait(false);
+            var result = await this.ExecuteDockerCommandAsync(argumentsString, null, cancellationToken).ConfigureAwait(false);
 
             if (result.ExitCode != 0)
             {
@@ -172,7 +171,7 @@ namespace VirtualClient.Common.Docker
                 throw new InvalidOperationException("Docker container creation succeeded but no container ID was returned.");
             }
 
-            this.LogDocker($"Docker container created successfully. Container ID: {containerId}");
+            this.logger?.LogInformation($"Docker container created successfully. Container ID: {containerId}");
             return containerId;
         }
 
@@ -186,7 +185,7 @@ namespace VirtualClient.Common.Docker
         {
             var arguments = $"exec {containerId} {command}";
 
-            this.LogDocker($"Executing command in container {containerId}: {command}");
+            this.logger?.LogInformation($"Executing command in container {containerId}: {command}");
 
             var result = await this.ExecuteDockerCommandAsync(arguments, null, cancellationToken).ConfigureAwait(false);
 
@@ -206,7 +205,7 @@ namespace VirtualClient.Common.Docker
         {
             try
             {
-                this.LogDocker($"Stopping Docker container: {containerId}");
+                this.logger?.LogInformation($"Stopping Docker container: {containerId}");
                 var result = await this.ExecuteDockerCommandAsync($"stop {containerId}", null, cancellationToken).ConfigureAwait(false);
                 return result.ExitCode == 0;
             }
@@ -224,7 +223,7 @@ namespace VirtualClient.Common.Docker
         {
             try
             {
-                this.LogDocker($"Removing Docker container: {containerId}");
+                this.logger?.LogInformation($"Removing Docker container: {containerId}");
                 var result = await this.ExecuteDockerCommandAsync($"rm {containerId}", null, cancellationToken).ConfigureAwait(false);
                 return result.ExitCode == 0;
             }
@@ -233,16 +232,6 @@ namespace VirtualClient.Common.Docker
                 this.logger?.LogWarning($"Failed to remove Docker container {containerId}: {ex.Message}");
                 return false;
             }
-        }
-
-        /// <summary>
-        /// Logs docker-related information with yellow color.
-        /// </summary>
-        private void LogDocker(string message)
-        {
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            this.logger?.LogInformation(message);
-            Console.ResetColor();
         }
 
         /// <summary>

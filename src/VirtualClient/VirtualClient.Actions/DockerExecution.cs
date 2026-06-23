@@ -77,13 +77,17 @@ namespace VirtualClient.Actions
             // Validate Docker image is specified
             if (string.IsNullOrWhiteSpace(this.Image))
             {
-                throw new ArgumentException("Docker image (Image parameter) is required for DockerExecution.");
+                throw new WorkloadException(
+                    "Docker image (Image parameter) is required for DockerExecution.",
+                    ErrorReason.InvalidProfileDefinition);
             }
 
             // Validate that at least one child component is defined
             if (this.Count == 0)
             {
-                throw new ArgumentException("DockerExecution must contain at least one child component.");
+                throw new WorkloadException(
+                    "DockerExecution must contain at least one child component.",
+                    ErrorReason.InvalidProfileDefinition);
             }
 
             this.Logger?.LogInformation(
@@ -161,14 +165,13 @@ namespace VirtualClient.Actions
 
                 try
                 {
-                    // Build command to execute component in container
-                    // Note: For MVP, we execute components individually
-                    // Full implementation would handle parameters and profiles
-                    string command = $"/app/VirtualClient.Main --component={componentName}";
+                    // Execute the component's profile action inside the container via docker exec.
+                    // The VirtualClient binary is expected to be volume-mounted at /app.
+                    string command = $"/app/VirtualClient --profile=/app/profiles/{componentName}.json";
 
                     this.Logger?.LogInformation($"DockerExecution: Running docker exec: {command}");
 
-                    var execResult = await this.dockerClient.ExecuteInContainerAsync(
+                    DockerExecResult execResult = await this.dockerClient.ExecuteInContainerAsync(
                         containerId,
                         command,
                         cancellationToken).ConfigureAwait(false);
@@ -181,18 +184,20 @@ namespace VirtualClient.Actions
                             $"Component={componentName}, ExitCode={execResult.ExitCode}, " +
                             $"Error={execResult.StandardError}");
 
-                        // Emit telemetry event for error
-                        this.Logger?.LogError($"Container Error Output: {execResult.StandardError}");
-
-                        throw new InvalidOperationException(
+                        throw new WorkloadException(
                             $"Component {componentName} failed inside container. Exit code: {execResult.ExitCode}. " +
-                            $"Error: {execResult.StandardError}");
+                            $"Error: {execResult.StandardError}",
+                            ErrorReason.WorkloadFailed);
                     }
 
                     if (!string.IsNullOrWhiteSpace(execResult.StandardOutput))
                     {
                         this.Logger?.LogInformation($"Container Output: {execResult.StandardOutput}");
                     }
+                }
+                catch (WorkloadException)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {

@@ -43,13 +43,17 @@ namespace VirtualClient
             // Validate docker image is provided
             if (string.IsNullOrWhiteSpace(this.DockerImage))
             {
-                throw new ArgumentException("Docker image (--image) is required for docker command execution.");
+                throw new WorkloadException(
+                    "Docker image (--image) is required for docker command execution.",
+                    ErrorReason.InvalidProfileDefinition);
             }
 
             // Validate that at least one profile is specified
             if (this.Profiles == null || !this.Profiles.Any())
             {
-                throw new ArgumentException("At least one profile (--profile) is required for docker command execution.");
+                throw new WorkloadException(
+                    "At least one profile (--profile) is required for docker command execution.",
+                    ErrorReason.InvalidProfileDefinition);
             }
 
             // Set timeout to reasonable default if not specified
@@ -80,9 +84,10 @@ namespace VirtualClient
 
                 if (!dockerAvailable)
                 {
-                    throw new InvalidOperationException(
+                    throw new WorkloadException(
                         "Docker is not available. Please ensure Docker is installed and the daemon is running. " +
-                        "Run 'docker version' to verify your Docker installation.");
+                        "Run 'docker version' to verify your Docker installation.",
+                        ErrorReason.DependencyNotFound);
                 }
 
                 this.LogDockerInfo(logger, "Docker is available and running.");
@@ -166,17 +171,18 @@ namespace VirtualClient
                     string type = action?["Type"]?.GetValue<string>() ?? string.Empty;
                     if (type.Equals("DockerExecution", StringComparison.OrdinalIgnoreCase))
                     {
-                        throw new InvalidOperationException(
+                        throw new WorkloadException(
                             $"Profile '{Path.GetFileName(profilePath)}' contains a 'DockerExecution' component " +
                             $"which conflicts with the 'docker' subcommand (double Docker). " +
-                            $"Remove DockerExecution from the profile when using the docker subcommand.");
+                            $"Remove DockerExecution from the profile when using the docker subcommand.",
+                            ErrorReason.InvalidProfileDefinition);
                     }
                 }
             }
         }
 
         /// <summary>
-        /// Executes each action component from the profiles inside the container via docker exec.
+        /// Executes the profile inside the container via docker exec using the mounted VirtualClient binary.
         /// </summary>
         private async Task<int> ExecuteActionsInContainerAsync(
             IServiceCollection dependencies, ILogger logger, CancellationToken cancellationToken)
@@ -186,39 +192,35 @@ namespace VirtualClient
             foreach (string profilePath in profilePaths)
             {
                 if (!File.Exists(profilePath))
-                    continue;
-
-                string json = await File.ReadAllTextAsync(profilePath, cancellationToken).ConfigureAwait(false);
-                JsonNode root = JsonNode.Parse(json);
-                JsonArray actions = root?["Actions"]?.AsArray();
-
-                if (actions == null)
-                    continue;
-
-                foreach (JsonNode action in actions)
                 {
-                    if (cancellationToken.IsCancellationRequested)
-                        return 1;
+                    continue;
+                }
 
-                    string componentType = action?["Type"]?.GetValue<string>() ?? string.Empty;
-                    if (string.IsNullOrEmpty(componentType))
-                        continue;
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return 1;
+                }
 
-                    this.LogDockerInfo(logger, $"Executing component in container: {componentType}");
-                    string command = $"/app/VirtualClient.Main --component={componentType}";
+                string profileFileName = Path.GetFileName(profilePath);
+                this.LogDockerInfo(logger, $"Executing profile in container: {profileFileName}");
 
-                    var result = await this.dockerClient.ExecuteInContainerAsync(
-                        this.containerId, command, cancellationToken).ConfigureAwait(false);
+                // Execute the profile inside the container using the volume-mounted VC binary
+                string command = $"/app/VirtualClient --profile=/app/profiles/{profileFileName}";
 
-                    if (!result.Success)
-                    {
-                        throw new InvalidOperationException(
-                            $"Component '{componentType}' failed in container. " +
-                            $"Exit code: {result.ExitCode}. Error: {result.StandardError}");
-                    }
+                DockerExecResult result = await this.dockerClient.ExecuteInContainerAsync(
+                    this.containerId, command, cancellationToken).ConfigureAwait(false);
 
-                    if (!string.IsNullOrWhiteSpace(result.StandardOutput))
-                        this.LogDockerInfo(logger, $"Container output: {result.StandardOutput}");
+                if (!result.Success)
+                {
+                    throw new WorkloadException(
+                        $"Profile '{profileFileName}' failed in container. " +
+                        $"Exit code: {result.ExitCode}. Error: {result.StandardError}",
+                        ErrorReason.WorkloadFailed);
+                }
+
+                if (!string.IsNullOrWhiteSpace(result.StandardOutput))
+                {
+                    this.LogDockerInfo(logger, $"Container output: {result.StandardOutput}");
                 }
             }
 
@@ -230,16 +232,19 @@ namespace VirtualClient
         /// </summary>
         private Dictionary<string, string> PrepareVolumeMounts(ILogger logger)
         {
-            var volumeMounts = new Dictionary<string, string>();
-            var currentDirectory = Environment.CurrentDirectory;
+            Dictionary<string, string> volumeMounts = new Dictionary<string, string>();
+            string currentDirectory = Environment.CurrentDirectory;
+
+            // Mount the VirtualClient binary directory so it can be executed inside the container
+            volumeMounts[currentDirectory] = "/app";
 
             // Standard mount points
-            volumeMounts[Path.Combine(currentDirectory, "packages")] = "/mnt/packages";
-            volumeMounts[Path.Combine(currentDirectory, "logs")] = "/mnt/logs";
-            volumeMounts[Path.Combine(currentDirectory, "state")] = "/mnt/state";
+            volumeMounts[Path.Combine(currentDirectory, "packages")] = "/app/packages";
+            volumeMounts[Path.Combine(currentDirectory, "logs")] = "/app/logs";
+            volumeMounts[Path.Combine(currentDirectory, "state")] = "/app/state";
 
             this.LogDockerInfo(logger,
-                $"Volume mounts configured: packages, logs, state directories mounted at /mnt/");
+                $"Volume mounts configured: VirtualClient binary, packages, logs, state directories mounted.");
 
             return volumeMounts;
         }
@@ -282,13 +287,11 @@ namespace VirtualClient
         }
 
         /// <summary>
-        /// Logs docker-related information with yellow color.
+        /// Logs docker-related information.
         /// </summary>
         private void LogDockerInfo(ILogger logger, string message)
         {
-            Console.ForegroundColor = ConsoleColor.Yellow;
             logger?.LogInformation(message);
-            Console.ResetColor();
         }
     }
 }
