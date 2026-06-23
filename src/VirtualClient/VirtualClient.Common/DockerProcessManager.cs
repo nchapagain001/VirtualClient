@@ -77,7 +77,7 @@ namespace VirtualClient.Common
                 return path;
             }
 
-            var translations = new Dictionary<string, string>
+            Dictionary<string, string> translations = new Dictionary<string, string>
             {
                 { Environment.GetEnvironmentVariable("VC_DOCKER_PACKAGES_HOST"), Environment.GetEnvironmentVariable("VC_DOCKER_PACKAGES_MOUNT") },
                 { Environment.GetEnvironmentVariable("VC_DOCKER_LOGS_HOST"), Environment.GetEnvironmentVariable("VC_DOCKER_LOGS_MOUNT") },
@@ -104,7 +104,7 @@ namespace VirtualClient.Common
 
             string result = arguments;
 
-            var translations = new Dictionary<string, string>
+            Dictionary<string, string> translations = new Dictionary<string, string>
             {
                 { Environment.GetEnvironmentVariable("VC_DOCKER_PACKAGES_HOST"), Environment.GetEnvironmentVariable("VC_DOCKER_PACKAGES_MOUNT") },
                 { Environment.GetEnvironmentVariable("VC_DOCKER_LOGS_HOST"), Environment.GetEnvironmentVariable("VC_DOCKER_LOGS_MOUNT") },

@@ -81,7 +81,15 @@ namespace VirtualClient
             switch (platform)
             {
                 case PlatformID.Unix:
-                    using (IProcessProxy chmod = systemManagement.ProcessManager.CreateElevatedProcess(platform, "chmod", $"+x \"{filePath}\""))
+                    // In Docker containers, we're running as root so sudo is not needed/available.
+                    // Check if we're in a Docker container context.
+                    bool inDockerContainer = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("VC_DOCKER_CONTAINER_ID"));
+
+                    IProcessProxy chmod = inDockerContainer
+                        ? systemManagement.ProcessManager.CreateProcess("chmod", $"+x \"{filePath}\"")
+                        : systemManagement.ProcessManager.CreateElevatedProcess(platform, "chmod", $"+x \"{filePath}\"");
+
+                    using (chmod)
                     {
                         await chmod.StartAndWaitAsync(cancellationToken, TimeSpan.FromSeconds(30)).ConfigureAwait(false);
                         chmod.ThrowIfErrored<WorkloadException>(
@@ -115,9 +123,17 @@ namespace VirtualClient
             switch (platform)
             {
                 case PlatformID.Unix:
+                    // In Docker containers, we're running as root so sudo is not needed/available.
+                    // Check if we're in a Docker container context.
+                    bool inDockerContainer = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("VC_DOCKER_CONTAINER_ID"));
+
                     // https://chmodcommand.com/chmod-2777/
                     // chmod 2777 sets everything to read/write/executable in the defined directory and make new file/directory inherit parent folder.
-                    using (IProcessProxy chmod = systemManagement.ProcessManager.CreateElevatedProcess(platform, "chmod", $"-R 2777 \"{directoryPath}\""))
+                    IProcessProxy chmod = inDockerContainer
+                        ? systemManagement.ProcessManager.CreateProcess("chmod", $"-R 2777 \"{directoryPath}\"")
+                        : systemManagement.ProcessManager.CreateElevatedProcess(platform, "chmod", $"-R 2777 \"{directoryPath}\"");
+
+                    using (chmod)
                     {
                         await chmod.StartAndWaitAsync(cancellationToken, TimeSpan.FromSeconds(30)).ConfigureAwait(false);
                         chmod.ThrowIfErrored<WorkloadException>(

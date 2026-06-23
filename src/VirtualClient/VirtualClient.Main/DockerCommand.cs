@@ -9,6 +9,7 @@ namespace VirtualClient
     using System.IO;
     using System.Linq;
     using System.Runtime.InteropServices;
+    using System.Text.Json;
     using System.Text.Json.Nodes;
     using System.Threading;
     using System.Threading.Tasks;
@@ -18,6 +19,7 @@ namespace VirtualClient
     using VirtualClient.Common.Extensions;
     using VirtualClient.Common.Telemetry;
     using VirtualClient.Contracts;
+    using VirtualClient.Logging;
 
     /// <summary>
     /// Command executes a workload profile inside a Docker container.
@@ -25,7 +27,6 @@ namespace VirtualClient
     internal class DockerCommand : ExecuteProfileCommand
     {
         private DockerContainerClient dockerClient;
-        private string containerId;
 
         /// <summary>
         /// The Docker image to use for container execution (e.g. ubuntu:noble, redis:7.0-alpine).
@@ -63,255 +64,136 @@ namespace VirtualClient
         }
 
         /// <summary>
-        /// Executes the docker command: creates container, runs profile, cleans up, then flushes telemetry.
+        /// Executes the docker command by wrapping profile actions with DockerExecution,
+        /// then executing the modified profile normally. Dependencies run on the host;
+        /// actions execute inside the container through DockerExecution orchestration.
         /// </summary>
         protected override async Task<int> ExecuteAsync(string[] args, IServiceCollection dependencies, CancellationTokenSource cancellationTokenSource)
         {
             ILogger logger = dependencies.GetService<ILogger>();
-            EventContext telemetryContext = EventContext.Persisted();
-            this.dockerClient = new DockerContainerClient(logger);
             PlatformSpecifics platformSpecifics = dependencies.GetService<PlatformSpecifics>();
-            CancellationToken cancellationToken = cancellationTokenSource.Token;
-            int exitCode = 0;
 
-            try
-            {
-                // Step 1: Ensure Docker is installed and running (auto-install if missing)
-                await this.EnsureDockerInstalledAndRunningAsync(dependencies, logger, cancellationTokenSource).ConfigureAwait(false);
+            // Verify Docker is available before proceeding
+            this.dockerClient = new DockerContainerClient(logger);
+            await this.EnsureDockerInstalledAndRunningAsync(logger, cancellationTokenSource).ConfigureAwait(false);
 
-                if (!dockerAvailable)
-                {
-                    throw new WorkloadException(
-                        "Docker is not available. Please ensure Docker is installed and the daemon is running. " +
-                        "Run 'docker version' to verify your Docker installation.",
-                        ErrorReason.DependencyNotFound);
-                }
+            // Wrap profile actions with DockerExecution component, leaving dependencies unchanged.
+            // DockerExecution will manage container creation, platform detection, and cleanup.
+            this.WrapProfileActionsWithDockerExecution(platformSpecifics);
 
-                // Step 3: Validate profile — fail immediately if DockerExecution is in any action (double Docker)
-                await this.ValidateProfileForDockerSubcommandAsync(dependencies, cancellationToken).ConfigureAwait(false);
-
-                // Step 3.5: Create Docker container with volume mounts
-                Dictionary<string, string> volumeMappings = this.PrepareVolumeMounts(logger, platformSpecifics);
-
-                this.containerId = await this.dockerClient.CreateContainerAsync(
-                    this.DockerImage,
-                    volumeMappings,
-                    null,
-                    cancellationToken).ConfigureAwait(false);
-
-                // Generate short container name alias for manual reference
-                string containerNameAlias = Guid.NewGuid().ToString().Substring(0, 8).ToLowerInvariant();
-                telemetryContext.AddContext(nameof(containerNameAlias), containerNameAlias)
-                                .AddContext("containerCreated", true)
-                                .AddContext(nameof(this.containerId), this.containerId)
-                                .AddContext(nameof(volumeMappings),  volumeMappings);
-
-                // Step 4: Set container ID in environment for child components
-                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_CONTAINER_ID, this.containerId);
-
-                // Step 5: Inspect image to detect container platform and set env vars for package resolution
-                (PlatformID containerPlatform, Architecture containerArch) = await this.dockerClient.InspectImageAsync(
-                    this.DockerImage, cancellationToken).ConfigureAwait(false);
-
-                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PLATFORM, containerPlatform.ToString());
-                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_ARCH, containerArch.ToString());
-
-                telemetryContext.AddContext(nameof(containerPlatform), containerPlatform.ToString())
-                                .AddContext(nameof(containerArch), containerArch.ToString());
-
-                // Step 5b: Set up path translation for container-aware ProcessManager
-                string currentDirectory = platformSpecifics.CurrentDirectory;
-
-                Dictionary<string, string> pathMappings = new Dictionary<string, string>
-                {
-                    { EnvironmentVariable.VC_DOCKER_PACKAGES_HOST, platformSpecifics.PackagesDirectory },
-                    { EnvironmentVariable.VC_DOCKER_LOGS_HOST, platformSpecifics.LogsDirectory },
-                    { EnvironmentVariable.VC_DOCKER_STATE_HOST, platformSpecifics.StateDirectory },
-                    { EnvironmentVariable.VC_DOCKER_PACKAGES_MOUNT, "/mnt/packages" },                    
-                    { EnvironmentVariable.VC_DOCKER_LOGS_MOUNT, "/mnt/logs" },
-                    { EnvironmentVariable.VC_DOCKER_STATE_MOUNT, "/mnt/state" }
-                };
-
-                foreach(var mapping in pathMappings)
-                {
-                    Environment.SetEnvironmentVariable(mapping.Key, mapping.Value);
-                }
-
-                telemetryContext.AddContext(nameof(pathMappings), pathMappings);
-
-                // Step 6: Install profile dependencies on host (packages volume-mounted into container)
-                this.InstallDependencies = true;
-                CancellationTokenSource cts1 = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                await base.ExecuteAsync(args, dependencies, cts1).ConfigureAwait(false);
-                this.InstallDependencies = false;
-
-                // Step 7: Execute profile actions — ProcessManager routing handled by Phase 5 wrapper
-                CancellationTokenSource cts2 = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                exitCode = await base.ExecuteAsync(args, dependencies, cts2).ConfigureAwait(false);
-
-                telemetryContext.AddContext(nameof(exitCode), exitCode);
-                telemetryContext.AddContext("executionSuccess", exitCode == 0);
-            }
-            finally
-            {
-                // Step 8: Cleanup container
-                if (!string.IsNullOrWhiteSpace(this.containerId))
-                {
-                    await this.CleanupContainerAsync(logger, cancellationToken).ConfigureAwait(false);
-                }
-            }
+            // Execute profile normally. Base class handles:
+            // 1. Dependency installation on host
+            // 2. DockerExecution initialization (creates container, detects platform)
+            // 3. Child action re-instantiation and execution within container
+            // 4. DockerExecution cleanup
+            int exitCode = await base.ExecuteAsync(args, dependencies, cancellationTokenSource).ConfigureAwait(false);
 
             return exitCode;
         }
 
         /// <summary>
-        /// Ensures Docker is installed and running. Auto-installs if not available.
+        /// Wraps the loaded profile's actions with a DockerExecution component.
         /// </summary>
-        private async Task EnsureDockerInstalledAndRunningAsync(IServiceCollection dependencies, ILogger logger, CancellationTokenSource cancellationTokenSource)
+        private void WrapProfileActionsWithDockerExecution(PlatformSpecifics platformSpecifics)
         {
-            this.LogDockerInfo(logger, "Checking Docker availability...");
-            bool dockerAvailable = await this.dockerClient.IsDockerAvailableAsync(cancellationTokenSource.Token).ConfigureAwait(false);
-
-            if (dockerAvailable)
+            if (this.Profiles == null || !this.Profiles.Any())
             {
                 return;
             }
 
-            this.LogDockerInfo(logger, "Docker not found. Installing Docker using INSTALL-DOCKER profile...");
+            DependencyProfileReference profileRef = this.Profiles.First();
+            string profilePath = Path.Combine(
+                platformSpecifics.ProfilesDirectory,
+                profileRef.ProfileName);
 
-            // Run INSTALL-DOCKER profile to install Docker
-            DependencyProfileReference originalProfile = this.Profiles?.FirstOrDefault();
+            if (!File.Exists(profilePath))
+            {
+                throw new WorkloadException(
+                    $"Profile not found at path: {profilePath}",
+                    ErrorReason.InvalidProfileDefinition);
+            }
+
+            string profileJson = File.ReadAllText(profilePath);
+            JsonNode profileNode = JsonNode.Parse(profileJson);
+
+            if (profileNode?["Actions"] is not JsonArray actionsArray)
+            {
+                throw new WorkloadException(
+                    $"Profile '{profileRef.ProfileName}' does not contain an Actions array.",
+                    ErrorReason.InvalidProfileDefinition);
+            }
+
+            // Detect nested DockerExecution: if the profile already contains a DockerExecution action,
+            // running the 'docker' subcommand would create a double-docker scenario.
+            bool hasDockerExecution = actionsArray
+                .OfType<JsonObject>()
+                .Any(action => string.Equals(
+                    action["Type"]?.GetValue<string>(),
+                    "DockerExecution",
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (hasDockerExecution)
+            {
+                string errorMessage =
+                    $"Profile '{profileRef.ProfileName}' already contains a 'DockerExecution' action. " +
+                    $"The 'docker' subcommand wraps profile actions in DockerExecution automatically. " +
+                    $"Either use the 'docker' subcommand with a standard profile (e.g. GET-STARTED-OPENSSL.json), " +
+                    $"or run the profile directly without the 'docker' subcommand (e.g. VirtualClient.exe --profile=GET-STARTED-OPENSSL-DOCKER.json).";
+
+                ConsoleLogger.Default.LogMessage(errorMessage, EventContext.Persisted());
+
+                throw new WorkloadException(errorMessage, ErrorReason.InvalidProfileDefinition);
+            }
+
+            // Create a new Actions array with DockerExecution wrapping the original actions
+            JsonArray newActions = new JsonArray();
+
+            JsonObject dockerExecutionAction = new JsonObject
+            {
+                ["Type"] = "DockerExecution",
+                ["Parameters"] = new JsonObject
+                {
+                    ["Image"] = this.DockerImage
+                },
+                ["Components"] = actionsArray.DeepClone() as JsonArray
+            };
+
+            newActions.Add(dockerExecutionAction);
+
+            // Replace the profile's Actions with the wrapped version
+            profileNode["Actions"] = newActions;
+
+            // Write the modified profile to a temporary location
+            string tempProfileName = $"{Path.GetFileNameWithoutExtension(profileRef.ProfileName)}_docker_wrapped.json";
+            string tempProfilePath = Path.Combine(
+                platformSpecifics.ProfilesDirectory,
+                tempProfileName);
+
+            File.WriteAllText(tempProfilePath, profileNode.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+
+            // Update this.Profiles to use the wrapped profile
             this.Profiles = new List<DependencyProfileReference>
             {
-                new DependencyProfileReference("INSTALL-DOCKER.json")
+                new DependencyProfileReference(tempProfileName)
             };
-            this.InstallDependencies = true;
-
-                foreach (JsonNode action in actions)
-                {
-                    string type = action?["Type"]?.GetValue<string>() ?? string.Empty;
-                    if (type.Equals("DockerExecution", StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new WorkloadException(
-                            $"Profile '{Path.GetFileName(profilePath)}' contains a 'DockerExecution' component " +
-                            $"which conflicts with the 'docker' subcommand (double Docker). " +
-                            $"Remove DockerExecution from the profile when using the docker subcommand.",
-                            ErrorReason.InvalidProfileDefinition);
-                    }
-                }
-            }
-
-            return imagesDir;
         }
 
         /// <summary>
-        /// Executes the profile inside the container via docker exec using the mounted VirtualClient binary.
+        /// Ensures Docker is installed and running.
         /// </summary>
-        private async Task ValidateProfileForDockerSubcommandAsync(IServiceCollection dependencies, CancellationToken cancellationToken)
+        private async Task EnsureDockerInstalledAndRunningAsync(ILogger logger, CancellationTokenSource cancellationTokenSource)
         {
-            IEnumerable<string> profilePaths = await this.EvaluateProfilesAsync(dependencies);
+            logger?.LogInformation("Checking Docker availability...");
+            bool dockerAvailable = await this.dockerClient.IsDockerAvailableAsync(cancellationTokenSource.Token).ConfigureAwait(false);
 
-            foreach (string profilePath in profilePaths)
+            if (!dockerAvailable)
             {
-                if (!File.Exists(profilePath))
-                {
-                    continue;
-                }
-
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    return 1;
-                }
-
-                string profileFileName = Path.GetFileName(profilePath);
-                this.LogDockerInfo(logger, $"Executing profile in container: {profileFileName}");
-
-                // Execute the profile inside the container using the volume-mounted VC binary
-                string command = $"/app/VirtualClient --profile=/app/profiles/{profileFileName}";
-
-                DockerExecResult result = await this.dockerClient.ExecuteInContainerAsync(
-                    this.containerId, command, cancellationToken).ConfigureAwait(false);
-
-                if (!result.Success)
-                {
-                    throw new WorkloadException(
-                        $"Profile '{profileFileName}' failed in container. " +
-                        $"Exit code: {result.ExitCode}. Error: {result.StandardError}",
-                        ErrorReason.WorkloadFailed);
-                }
-
-                if (!string.IsNullOrWhiteSpace(result.StandardOutput))
-                {
-                    this.LogDockerInfo(logger, $"Container output: {result.StandardOutput}");
-                }
+                throw new WorkloadException(
+                    "Docker is not available on this system. Please install Docker and ensure it is running before using the docker subcommand.",
+                    ErrorReason.InvalidProfileDefinition);
             }
 
-
-        /// <summary>
-        /// Prepares volume mounts for container using platform-specific directories.
-        /// </summary>
-        private Dictionary<string, string> PrepareVolumeMounts(ILogger logger, PlatformSpecifics platformSpecifics)
-        {
-            Dictionary<string, string> volumeMounts = new Dictionary<string, string>();
-            string currentDirectory = Environment.CurrentDirectory;
-
-            // Mount the VirtualClient binary directory so it can be executed inside the container
-            volumeMounts[currentDirectory] = "/app";
-
-            // Standard mount points
-            volumeMounts[Path.Combine(currentDirectory, "packages")] = "/app/packages";
-            volumeMounts[Path.Combine(currentDirectory, "logs")] = "/app/logs";
-            volumeMounts[Path.Combine(currentDirectory, "state")] = "/app/state";
-
-            this.LogDockerInfo(logger,
-                $"Volume mounts configured: VirtualClient binary, packages, logs, state directories mounted.");
-
-            return volumeMounts;
-        }
-
-        /// <summary>
-        /// Cleans up Docker container after execution.
-        /// </summary>
-        private async Task CleanupContainerAsync(ILogger logger, CancellationToken cancellationToken)
-        {
-            try
-            {
-                if (this.KeepContainerAlive)
-                {
-                    this.LogDockerInfo(logger,
-                        $"Container is being kept alive for debugging. Container ID: {this.containerId}. " +
-                        $"To manually inspect: docker exec -it {this.containerId} bash. " +
-                        $"To cleanup: docker stop {this.containerId} && docker rm {this.containerId}");
-                }
-                else
-                {
-                    this.LogDockerInfo(logger, $"Stopping container: {this.containerId}");
-                    await this.dockerClient.StopContainerAsync(this.containerId, cancellationToken).ConfigureAwait(false);
-
-                    this.LogDockerInfo(logger, $"Removing container: {this.containerId}");
-                    await this.dockerClient.RemoveContainerAsync(this.containerId, cancellationToken).ConfigureAwait(false);
-
-                    this.LogDockerInfo(logger, "Container cleaned up successfully.");
-                }
-            }
-            catch (Exception ex)
-            {
-                logger?.LogWarning($"Container cleanup encountered an error: {ex.Message}");
-                if (!this.KeepContainerAlive)
-                {
-                    logger?.LogWarning(
-                        $"Manual cleanup may be needed. Container ID: {this.containerId}. " +
-                        $"Run: docker stop {this.containerId} && docker rm {this.containerId}");
-                }
-            }
-        }
-
-        /// <summary>
-        /// Logs docker-related information.
-        /// </summary>
-        private void LogDockerInfo(ILogger logger, string message)
-        {
-            logger?.LogInformation(message);
+            logger?.LogInformation("Docker is available and running.");
         }
     }
 }

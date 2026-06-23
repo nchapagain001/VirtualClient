@@ -89,6 +89,9 @@ namespace VirtualClient.Actions
 
             await this.InitializeWorkloadToolsetsAsync(cancellationToken)
                 .ConfigureAwait(false);
+                        
+            Console.WriteLine($"========\n{nameof(this.ExecutablePath)}: {this.ExecutablePath}\nPlatformArchitectureName: {this.PlatformArchitectureName}\n========\n");
+
         }
 
         /// <summary>
