@@ -17,7 +17,7 @@
         Scripts/content that needs to be copied into the build output 'scripts' directory.
         -->
 		<ScriptFiles Include="DotNet\*.sh;DotNet\*.ps1" />
-		<ScriptFiles Include="Network\*.sh;Network\*.cmd" />
+		<ScriptFiles Include="Docker\*.ps1;Docker\*.sh" />
     </ItemGroup>
 
     <Target Name="CopyDependencyScriptsToOutput" AfterTargets="Build">
