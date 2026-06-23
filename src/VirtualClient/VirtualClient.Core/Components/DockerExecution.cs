@@ -93,6 +93,8 @@ namespace VirtualClient
             {
                 // Container was created by DockerCommand, get its platform info
                 await this.DetectContainerPlatformAsync(cancellationToken).ConfigureAwait(false);
+                logger?.LogInformation(
+                    $"DockerExecution: Container reused from previous iteration: {containerId.Substring(0, 12)}... ({this.containerPlatform}-{this.containerArchitecture})");
             }
 
             // Signal that we're in container execution mode so that CreateElevatedProcess

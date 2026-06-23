@@ -77,6 +77,8 @@ namespace VirtualClient
             this.dockerClient = new DockerContainerClient(logger);
             await this.EnsureDockerInstalledAndRunningAsync(logger, cancellationTokenSource).ConfigureAwait(false);
 
+            logger?.LogInformation($"Docker execution mode enabled with image: {this.DockerImage}");
+
             // Wrap profile actions with DockerExecution component, leaving dependencies unchanged.
             // DockerExecution will manage container creation, but not cleanup (we handle cleanup here).
             this.WrapProfileActionsWithDockerExecution(platformSpecifics);
@@ -251,10 +253,14 @@ namespace VirtualClient
 
             try
             {
+                string containerImage = Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_IMAGE);
+                string containerPlatform = Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PLATFORM);
+                string containerArch = Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_ARCH);
+
                 logger?.LogInformation($"Cleaning up Docker container: {containerId}");
                 await this.dockerClient.StopContainerAsync(containerId, cancellationTokenSource.Token).ConfigureAwait(false);
                 await this.dockerClient.RemoveContainerAsync(containerId, cancellationTokenSource.Token).ConfigureAwait(false);
-                logger?.LogInformation($"Docker container removed successfully.");
+                logger?.LogInformation($"Docker container cleanup successful - Image: {containerImage}, Platform: {containerPlatform}-{containerArch}");
             }
             catch (Exception ex)
             {
