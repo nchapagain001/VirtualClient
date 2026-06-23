@@ -45,8 +45,12 @@ namespace VirtualClient.Common
             string translatedWorkingDir = this.TranslatePath(workingDir);
             string translatedArguments = this.TranslateArguments(arguments);
 
+            // docker exec -w requires a valid Unix absolute path (starts with /).
+            // If translated working directory is not a valid Unix path, don't use -w flag.
+            bool isValidUnixPath = !string.IsNullOrEmpty(translatedWorkingDir) && translatedWorkingDir.StartsWith("/");
+
             string dockerExecCommand = $"docker";
-            string dockerExecArgs = string.IsNullOrWhiteSpace(translatedWorkingDir)
+            string dockerExecArgs = !isValidUnixPath
                 ? $"exec {containerId} {translatedCommand}"
                 : $"exec -w {translatedWorkingDir} {containerId} {translatedCommand}";
 
@@ -77,6 +81,9 @@ namespace VirtualClient.Common
                 return path;
             }
 
+            // Normalize separators for comparison — env vars may use backslashes while paths may use forward slashes
+            string normalizedPath = path.Replace('\\', '/');
+
             Dictionary<string, string> translations = new Dictionary<string, string>
             {
                 { Environment.GetEnvironmentVariable("VC_DOCKER_PACKAGES_HOST"), Environment.GetEnvironmentVariable("VC_DOCKER_PACKAGES_MOUNT") },
@@ -86,13 +93,17 @@ namespace VirtualClient.Common
 
             foreach (var (hostPath, containerPath) in translations)
             {
-                if (!string.IsNullOrEmpty(hostPath) && !string.IsNullOrEmpty(containerPath) && path.StartsWith(hostPath))
+                if (!string.IsNullOrEmpty(hostPath) && !string.IsNullOrEmpty(containerPath))
                 {
-                    return path.Replace(hostPath, containerPath).Replace('\\', '/');
+                    string normalizedHostPath = hostPath.Replace('\\', '/');
+                    if (normalizedPath.StartsWith(normalizedHostPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return normalizedPath.Replace(normalizedHostPath, containerPath);
+                    }
                 }
             }
 
-            return path;
+            return normalizedPath;
         }
 
         private string TranslateArguments(string arguments)
@@ -102,7 +113,8 @@ namespace VirtualClient.Common
                 return arguments;
             }
 
-            string result = arguments;
+            // Normalize separators for comparison — env vars may use backslashes while arguments may use forward slashes
+            string result = arguments.Replace('\\', '/');
 
             Dictionary<string, string> translations = new Dictionary<string, string>
             {
@@ -111,20 +123,16 @@ namespace VirtualClient.Common
                 { Environment.GetEnvironmentVariable("VC_DOCKER_STATE_HOST"), Environment.GetEnvironmentVariable("VC_DOCKER_STATE_MOUNT") }
             };
 
-            bool translated = false;
-
             foreach (var (hostPath, containerPath) in translations)
             {
-                if (!string.IsNullOrEmpty(hostPath) && !string.IsNullOrEmpty(containerPath) && result.Contains(hostPath))
+                if (!string.IsNullOrEmpty(hostPath) && !string.IsNullOrEmpty(containerPath))
                 {
-                    result = result.Replace(hostPath, containerPath);
-                    translated = true;
+                    string normalizedHostPath = hostPath.Replace('\\', '/');
+                    if (result.Contains(normalizedHostPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        result = result.Replace(normalizedHostPath, containerPath, StringComparison.OrdinalIgnoreCase);
+                    }
                 }
-            }
-
-            if (translated)
-            {
-                result = result.Replace('\\', '/');
             }
 
             return result;

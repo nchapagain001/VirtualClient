@@ -95,48 +95,53 @@ namespace VirtualClient
                 await this.DetectContainerPlatformAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            // Re-instantiate and execute child components with platform-appropriate services
-            foreach (VirtualClientComponent component in this)
+            // Signal that we're in container execution mode so that CreateElevatedProcess
+            // doesn't add 'sudo' (we're already running as root inside the container).
+            bool originalRunningInContainer = PlatformSpecifics.RunningInContainer;
+            try
             {
-                if (!VirtualClientComponent.IsSupported(component))
+                PlatformSpecifics.RunningInContainer = true;
+
+                // Re-instantiate and execute child components with platform-appropriate services
+                foreach (VirtualClientComponent component in this)
                 {
-                    logger?.LogInformation(
-                        $"DockerExecution: Skipping component '{component.TypeName}' - not supported for container platform {this.containerPlatform}-{this.containerArchitecture}");
-                    continue;
+                    if (!VirtualClientComponent.IsSupported(component))
+                    {
+                        logger?.LogInformation(
+                            $"DockerExecution: Skipping component '{component.TypeName}' - not supported for container platform {this.containerPlatform}-{this.containerArchitecture}");
+                        continue;
+                    }
+
+                    // Re-instantiate the component with container platform services
+                    VirtualClientComponent reInstantiatedComponent = await this.ReInstantiateComponentAsync(
+                        component, logger, cancellationToken).ConfigureAwait(false);
+
+                    await reInstantiatedComponent.ExecuteAsync(cancellationToken).ConfigureAwait(false);
+
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
                 }
-
-                // Re-instantiate the component with container platform services
-                VirtualClientComponent reInstantiatedComponent = await this.ReInstantiateComponentAsync(
-                    component, logger, cancellationToken).ConfigureAwait(false);
-
-                await reInstantiatedComponent.ExecuteAsync(cancellationToken).ConfigureAwait(false);
-
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    break;
-                }
+            }
+            finally
+            {
+                PlatformSpecifics.RunningInContainer = originalRunningInContainer;
             }
         }
 
         /// <summary>
         /// Cleans up Docker container resources.
+        /// Note: Container removal is handled by DockerCommand after all iterations complete.
+        /// This method performs only minimal cleanup to avoid disrupting multi-iteration execution.
         /// </summary>
-        protected override async Task CleanupAsync(EventContext telemetryContext, CancellationToken cancellationToken)
+        protected override Task CleanupAsync(EventContext telemetryContext, CancellationToken cancellationToken)
         {
-            if (!string.IsNullOrWhiteSpace(this.createdContainerId))
-            {
-                try
-                {
-                    await this.dockerClient.StopContainerAsync(this.createdContainerId, cancellationToken).ConfigureAwait(false);
-                    await this.dockerClient.RemoveContainerAsync(this.createdContainerId, cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    this.Logger?.LogWarning($"Failed to cleanup Docker container {this.createdContainerId}: {ex.Message}");
-                }
-            }
+            // Container lifecycle is managed by DockerCommand (created on first iteration,
+            // reused for subsequent iterations, removed after all iterations or on error).
+            // We do NOT remove the container or clear env vars here — let DockerCommand handle that.
 
-            await base.CleanupAsync(telemetryContext, cancellationToken).ConfigureAwait(false);
+            return base.CleanupAsync(telemetryContext, cancellationToken);
         }
 
         /// <summary>
@@ -172,10 +177,15 @@ namespace VirtualClient
             // Prepare volume mounts mapping host directories to container paths
             PlatformSpecifics platformSpecifics = this.PlatformSpecifics;
             Dictionary<string, string> volumeMounts = new Dictionary<string, string>
-            {
-                { platformSpecifics.PackagesDirectory, "/mnt/packages" },
+            {                
                 { platformSpecifics.LogsDirectory, "/mnt/logs" },
-                { platformSpecifics.StateDirectory, "/mnt/state" }
+                { platformSpecifics.ContentUploadsDirectory, "/mnt/contentuploads" },
+                { platformSpecifics.PackagesDirectory, "/mnt/packages" },
+                { platformSpecifics.ProfilesDirectory, "/mnt/profiles" },
+                { platformSpecifics.ScriptsDirectory, "/mnt/scripts" },
+                { platformSpecifics.StateDirectory, "/mnt/state" },
+                { platformSpecifics.TempDirectory, "/mnt/temp" },                
+                { platformSpecifics.ToolsDirectory, "/mnt/tools" }
             };
 
             // Create container
@@ -224,16 +234,15 @@ namespace VirtualClient
             // Get the original SystemManagement from parent dependencies before we create the new collection
             IServiceProvider originalProvider = this.Dependencies.BuildServiceProvider();
             ISystemManagement originalSystemManagement = originalProvider.GetService<ISystemManagement>();
+            PlatformSpecifics hostPlatformSpecifics = originalProvider.GetService<PlatformSpecifics>();
 
-            // Create a new ServiceCollection that copies services from parent with ProcessManager override
+            // Create a new ServiceCollection that copies services from parent with overrides for container execution
             IServiceCollection containerServices = new ServiceCollection();
 
-            // Copy all registrations from parent EXCEPT ProcessManager (we'll create a new one)
+            // Copy all registrations from parent EXCEPT ProcessManager and PlatformSpecifics (we'll create new ones)
             foreach (ServiceDescriptor descriptor in this.Dependencies)
             {
-                // Skip only ProcessManager - we'll create a container-specific version
-                // ISystemManagement will be re-registered with new ProcessManager below
-                if (descriptor.ServiceType == typeof(ProcessManager))
+                if (descriptor.ServiceType == typeof(ProcessManager) || descriptor.ServiceType == typeof(PlatformSpecifics))
                 {
                     continue;
                 }
@@ -241,27 +250,33 @@ namespace VirtualClient
                 containerServices.Add(descriptor);
             }
 
+            // Register new PlatformSpecifics reflecting the container's platform/architecture
+            // Keep the same working directory so paths to packages/logs/state remain correct on the host
+            PlatformSpecifics containerPlatformSpecifics = new PlatformSpecifics(
+                this.containerPlatform,
+                this.containerArchitecture,
+                hostPlatformSpecifics.CurrentDirectory,
+                useUnixStylePathsOnly: false);
+
+            containerServices.AddSingleton<PlatformSpecifics>(containerPlatformSpecifics);
+
             // Register new ProcessManager wrapped with DockerProcessManager
             ProcessManager hostProcessManager = ProcessManager.Create(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? PlatformID.Win32NT : PlatformID.Unix);
             ProcessManager dockerAwareProcessManager = new DockerProcessManager(hostProcessManager);
             containerServices.AddSingleton<ProcessManager>(dockerAwareProcessManager);
 
             // Override SystemManagement in the new collection to use the new DockerProcessManager
-            // Get the descriptor and remove it, then add a new one with updated ProcessManager
             foreach (ServiceDescriptor descriptor in this.Dependencies)
             {
                 if (descriptor.ServiceType == typeof(ISystemManagement))
                 {
-                    // Remove the old ISystemManagement descriptor from the new collection
                     int indexToRemove = containerServices.ToList().FindIndex(d => d.ServiceType == typeof(ISystemManagement));
                     if (indexToRemove >= 0)
                     {
-                        // Create a modified copy of the original SystemManagement with new ProcessManager
                         if (originalSystemManagement is SystemManagement originalSysMgmt)
                         {
-                            // Set the ProcessManager on the original instance to the docker-aware version
                             originalSysMgmt.ProcessManager = dockerAwareProcessManager;
-                            // Re-register it
+                            originalSysMgmt.PlatformSpecifics = containerPlatformSpecifics;
                             containerServices.AddSingleton<ISystemManagement>(originalSystemManagement);
                         }
                     }

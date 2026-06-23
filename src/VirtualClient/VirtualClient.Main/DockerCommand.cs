@@ -78,17 +78,24 @@ namespace VirtualClient
             await this.EnsureDockerInstalledAndRunningAsync(logger, cancellationTokenSource).ConfigureAwait(false);
 
             // Wrap profile actions with DockerExecution component, leaving dependencies unchanged.
-            // DockerExecution will manage container creation, platform detection, and cleanup.
+            // DockerExecution will manage container creation, but not cleanup (we handle cleanup here).
             this.WrapProfileActionsWithDockerExecution(platformSpecifics);
 
-            // Execute profile normally. Base class handles:
-            // 1. Dependency installation on host
-            // 2. DockerExecution initialization (creates container, detects platform)
-            // 3. Child action re-instantiation and execution within container
-            // 4. DockerExecution cleanup
-            int exitCode = await base.ExecuteAsync(args, dependencies, cancellationTokenSource).ConfigureAwait(false);
-
-            return exitCode;
+            try
+            {
+                // Execute profile normally. Base class handles:
+                // 1. Dependency installation on host
+                // 2. DockerExecution initialization (creates container, detects platform)
+                // 3. Child action re-instantiation and execution within container
+                // 4. Multiple iterations reuse the same container
+                int exitCode = await base.ExecuteAsync(args, dependencies, cancellationTokenSource).ConfigureAwait(false);
+                return exitCode;
+            }
+            finally
+            {
+                // Clean up Docker container after all iterations complete (unless user requested to keep it alive).
+                await this.CleanupDockerContainerAsync(logger, cancellationTokenSource).ConfigureAwait(false);
+            }
         }
 
         /// <summary>
@@ -145,8 +152,37 @@ namespace VirtualClient
                 throw new WorkloadException(errorMessage, ErrorReason.InvalidProfileDefinition);
             }
 
-            // Create a new Actions array with DockerExecution wrapping the original actions
+            // Create a new Actions array with DockerExecution wrapping the original actions.
+            // Any LinuxPackageInstallation dependencies are moved into the container so packages
+            // are installed inside the container rather than on the host.
             JsonArray newActions = new JsonArray();
+
+            JsonArray dockerComponents = new JsonArray();
+
+            // Move LinuxPackageInstallation dependencies into the container components (run first, before actions).
+            if (profileNode["Dependencies"] is JsonArray dependenciesArray)
+            {
+                List<int> indicesToRemove = new List<int>();
+                for (int i = 0; i < dependenciesArray.Count; i++)
+                {
+                    if (dependenciesArray[i] is JsonObject depObj &&
+                        string.Equals(depObj["Type"]?.GetValue<string>(), "LinuxPackageInstallation", StringComparison.OrdinalIgnoreCase))
+                    {
+                        dockerComponents.Add(depObj.DeepClone());
+                        indicesToRemove.Add(i);
+                    }
+                }
+
+                for (int i = indicesToRemove.Count - 1; i >= 0; i--)
+                {
+                    dependenciesArray.RemoveAt(indicesToRemove[i]);
+                }
+            }
+
+            foreach (JsonNode action in actionsArray)
+            {
+                dockerComponents.Add(action.DeepClone());
+            }
 
             JsonObject dockerExecutionAction = new JsonObject
             {
@@ -155,7 +191,7 @@ namespace VirtualClient
                 {
                     ["Image"] = this.DockerImage
                 },
-                ["Components"] = actionsArray.DeepClone() as JsonArray
+                ["Components"] = dockerComponents
             };
 
             newActions.Add(dockerExecutionAction);
@@ -194,6 +230,44 @@ namespace VirtualClient
             }
 
             logger?.LogInformation("Docker is available and running.");
+        }
+
+        /// <summary>
+        /// Cleans up the Docker container created for this execution.
+        /// </summary>
+        private async Task CleanupDockerContainerAsync(ILogger logger, CancellationTokenSource cancellationTokenSource)
+        {
+            if (this.KeepContainerAlive)
+            {
+                logger?.LogInformation("Container cleanup skipped (--keep-container-alive flag is set).");
+                return;
+            }
+
+            string containerId = Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_CONTAINER_ID);
+            if (string.IsNullOrWhiteSpace(containerId))
+            {
+                return;
+            }
+
+            try
+            {
+                logger?.LogInformation($"Cleaning up Docker container: {containerId}");
+                await this.dockerClient.StopContainerAsync(containerId, cancellationTokenSource.Token).ConfigureAwait(false);
+                await this.dockerClient.RemoveContainerAsync(containerId, cancellationTokenSource.Token).ConfigureAwait(false);
+                logger?.LogInformation($"Docker container removed successfully.");
+            }
+            catch (Exception ex)
+            {
+                logger?.LogWarning($"Failed to cleanup Docker container {containerId}: {ex.Message}");
+            }
+            finally
+            {
+                // Clear the container ID env vars
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_CONTAINER_ID, null);
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PLATFORM, null);
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_ARCH, null);
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_IMAGE, null);
+            }
         }
     }
 }

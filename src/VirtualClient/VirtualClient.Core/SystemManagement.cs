@@ -145,13 +145,36 @@ namespace VirtualClient
             }
             catch
             {
-                using (IProcessProxy process = this.ProcessManager.CreateElevatedProcess(PlatformID.Unix, "hostnamectl", string.Empty, Environment.CurrentDirectory))
+                // File read failed (e.g. on Windows host routing to a container).
+                // Use process execution — DockerProcessManager routes this to `docker exec {id} cat /etc/os-release`.
+                bool catSucceeded = false;
+                try
                 {
-                    await process.StartAndWaitAsync(cancellationToken);
-                    process.ThrowIfErrored<ProcessException>(ProcessProxy.DefaultSuccessCodes, "hostnamectl failed.", errorReason: ErrorReason.LinuxDistributionNotSupported);
-                    HostnamectlParser parser = new HostnamectlParser(process.StandardOutput.ToString());
+                    using (IProcessProxy catProcess = this.ProcessManager.CreateProcess("cat", "/etc/os-release"))
+                    {
+                        await catProcess.StartAndWaitAsync(cancellationToken);
+                        if (catProcess.ExitCode == 0)
+                        {
+                            OsReleaseFileParser catParser = new OsReleaseFileParser(catProcess.StandardOutput.ToString());
+                            result = catParser.Parse();
+                            catSucceeded = true;
+                        }
+                    }
+                }
+                catch
+                {
+                    // fall through to hostnamectl
+                }
 
-                    result = parser.Parse();
+                if (!catSucceeded)
+                {
+                    using (IProcessProxy process = this.ProcessManager.CreateElevatedProcess(PlatformID.Unix, "hostnamectl", string.Empty, Environment.CurrentDirectory))
+                    {
+                        await process.StartAndWaitAsync(cancellationToken);
+                        process.ThrowIfErrored<ProcessException>(ProcessProxy.DefaultSuccessCodes, "hostnamectl failed.", errorReason: ErrorReason.LinuxDistributionNotSupported);
+                        HostnamectlParser parser = new HostnamectlParser(process.StandardOutput.ToString());
+                        result = parser.Parse();
+                    }
                 }
             }
 
