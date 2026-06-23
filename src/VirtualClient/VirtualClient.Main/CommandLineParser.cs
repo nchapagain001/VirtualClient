@@ -485,6 +485,9 @@ namespace VirtualClient
 
                 // OPTIONAL
                 // -------------------------------------------------------------------
+                // --keep-container-alive
+                OptionFactory.CreateKeepContainerAliveFlag(required: false, false),
+
                 // --parameters
                 OptionFactory.CreateParametersOption(required: false),
 
@@ -499,9 +502,6 @@ namespace VirtualClient
 
                 // --verbose
                 OptionFactory.CreateVerboseFlag(required: false, false),
-
-                // --keep-container-alive
-                OptionFactory.CreateKeepContainerAliveFlag(required: false, false),
 
                 // --logger
                 OptionFactory.CreateLoggerOption(required: false),

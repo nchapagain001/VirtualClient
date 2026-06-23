@@ -77,26 +77,22 @@ namespace VirtualClient
             this.dockerClient = new DockerContainerClient(logger);
             await this.EnsureDockerInstalledAndRunningAsync(logger, cancellationTokenSource).ConfigureAwait(false);
 
-            logger?.LogInformation($"Docker execution mode enabled with image: {this.DockerImage}");
-
             // Wrap profile actions with DockerExecution component, leaving dependencies unchanged.
-            // DockerExecution will manage container creation, but not cleanup (we handle cleanup here).
             this.WrapProfileActionsWithDockerExecution(platformSpecifics);
 
             try
             {
-                // Execute profile normally. Base class handles:
-                // 1. Dependency installation on host
-                // 2. DockerExecution initialization (creates container, detects platform)
-                // 3. Child action re-instantiation and execution within container
-                // 4. Multiple iterations reuse the same container
-                int exitCode = await base.ExecuteAsync(args, dependencies, cancellationTokenSource).ConfigureAwait(false);
-                return exitCode;
+                // Execute profile normally. DockerExecution manages container with DeferContainerCleanup=true.
+                // All iterations reuse the same container.
+                return await base.ExecuteAsync(args, dependencies, cancellationTokenSource).ConfigureAwait(false);
             }
             finally
             {
-                // Clean up Docker container after all iterations complete (unless user requested to keep it alive).
-                await this.CleanupDockerContainerAsync(logger, cancellationTokenSource).ConfigureAwait(false);
+                if (!this.KeepContainerAlive)
+                {
+                    // Clean up Docker container after all iterations complete (unless user requested to keep it alive).
+                    await this.CleanupDockerContainerAsync(logger, cancellationTokenSource).ConfigureAwait(false);
+                }
             }
         }
 
@@ -191,7 +187,8 @@ namespace VirtualClient
                 ["Type"] = "DockerExecution",
                 ["Parameters"] = new JsonObject
                 {
-                    ["Image"] = this.DockerImage
+                    ["Image"] = this.DockerImage,
+                    ["DeferContainerCleanup"] = true
                 },
                 ["Components"] = dockerComponents
             };
@@ -239,40 +236,36 @@ namespace VirtualClient
         /// </summary>
         private async Task CleanupDockerContainerAsync(ILogger logger, CancellationTokenSource cancellationTokenSource)
         {
-            if (this.KeepContainerAlive)
-            {
-                logger?.LogInformation("Container cleanup skipped (--keep-container-alive flag is set).");
-                return;
-            }
-
-            string containerId = Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_CONTAINER_ID);
-            if (string.IsNullOrWhiteSpace(containerId))
-            {
-                return;
-            }
-
             try
             {
-                string containerImage = Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_IMAGE);
-                string containerPlatform = Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PLATFORM);
-                string containerArch = Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_ARCH);
+                string containerId = Environment.GetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_CONTAINER_ID);
+
+                if (string.IsNullOrWhiteSpace(containerId))
+                {
+                    return;
+                }
 
                 logger?.LogInformation($"Cleaning up Docker container: {containerId}");
                 await this.dockerClient.StopContainerAsync(containerId, cancellationTokenSource.Token).ConfigureAwait(false);
                 await this.dockerClient.RemoveContainerAsync(containerId, cancellationTokenSource.Token).ConfigureAwait(false);
-                logger?.LogInformation($"Docker container cleanup successful - Image: {containerImage}, Platform: {containerPlatform}-{containerArch}");
+                logger?.LogInformation($"Docker container cleanup completed.");
             }
             catch (Exception ex)
             {
-                logger?.LogWarning($"Failed to cleanup Docker container {containerId}: {ex.Message}");
+                logger?.LogWarning($"Failed to cleanup Docker container: {ex.Message}");
             }
             finally
             {
-                // Clear the container ID env vars
+                // Clear Docker environment variables
                 Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_CONTAINER_ID, null);
                 Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PLATFORM, null);
                 Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_ARCH, null);
-                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_IMAGE, null);
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PACKAGES_HOST, null);
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PACKAGES_MOUNT, null);
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_LOGS_HOST, null);
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_LOGS_MOUNT, null);
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_STATE_HOST, null);
+                Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_STATE_MOUNT, null);
             }
         }
     }

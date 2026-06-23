@@ -50,6 +50,19 @@ namespace VirtualClient
         }
 
         /// <summary>
+        /// Whether to defer container cleanup to external management (e.g., DockerCommand).
+        /// When true, cleanup is skipped in CleanupAsync (handled by parent DockerCommand).
+        /// When false, cleanup happens immediately after component execution.
+        /// </summary>
+        public bool DeferContainerCleanup
+        {
+            get
+            {
+                return this.Parameters.GetValue<bool>(nameof(this.DeferContainerCleanup), false);
+            }
+        }
+
+        /// <summary>
         /// Initializes Docker container execution requirements.
         /// </summary>
         protected override Task InitializeAsync(EventContext telemetryContext, CancellationToken cancellationToken)
@@ -93,8 +106,6 @@ namespace VirtualClient
             {
                 // Container was created by DockerCommand, get its platform info
                 await this.DetectContainerPlatformAsync(cancellationToken).ConfigureAwait(false);
-                logger?.LogInformation(
-                    $"DockerExecution: Container reused from previous iteration: {containerId.Substring(0, 12)}... ({this.containerPlatform}-{this.containerArchitecture})");
             }
 
             // Signal that we're in container execution mode so that CreateElevatedProcess
@@ -134,16 +145,47 @@ namespace VirtualClient
 
         /// <summary>
         /// Cleans up Docker container resources.
-        /// Note: Container removal is handled by DockerCommand after all iterations complete.
-        /// This method performs only minimal cleanup to avoid disrupting multi-iteration execution.
+        /// Removes container only if this component instance created it AND cleanup is not deferred.
         /// </summary>
-        protected override Task CleanupAsync(EventContext telemetryContext, CancellationToken cancellationToken)
+        protected override async Task CleanupAsync(EventContext telemetryContext, CancellationToken cancellationToken)
         {
-            // Container lifecycle is managed by DockerCommand (created on first iteration,
-            // reused for subsequent iterations, removed after all iterations or on error).
-            // We do NOT remove the container or clear env vars here — let DockerCommand handle that.
+            // Only clean up if this instance created the container
+            if (!string.IsNullOrWhiteSpace(this.createdContainerId))
+            {
+                // If cleanup is deferred (DeferContainerCleanup=true), skip it (parent handles cleanup)
+                if (!this.DeferContainerCleanup)
+                {
+                    try
+                    {
+                        this.Logger?.LogInformation($"Cleaning up Docker container: {this.createdContainerId}");
+                        await this.dockerClient.StopContainerAsync(this.createdContainerId, cancellationToken).ConfigureAwait(false);
+                        await this.dockerClient.RemoveContainerAsync(this.createdContainerId, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        this.Logger?.LogWarning($"Failed to cleanup Docker container {this.createdContainerId}: {ex.Message}");
+                    }
+                    finally
+                    {
+                        // Clear environment variables
+                        Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_CONTAINER_ID, null);
+                        Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PLATFORM, null);
+                        Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_ARCH, null);
+                        Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PACKAGES_HOST, null);
+                        Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PACKAGES_MOUNT, null);
+                        Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_LOGS_HOST, null);
+                        Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_LOGS_MOUNT, null);
+                        Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_STATE_HOST, null);
+                        Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_STATE_MOUNT, null);
+                    }
+                }
+                else
+                {
+                    this.Logger?.LogInformation("Container cleanup skipped (--keep-container-alive flag is set).");
+                }
+            }
 
-            return base.CleanupAsync(telemetryContext, cancellationToken);
+            await base.CleanupAsync(telemetryContext, cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -201,7 +243,6 @@ namespace VirtualClient
             Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_CONTAINER_ID, containerId);
             Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PLATFORM, this.containerPlatform.ToString());
             Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_ARCH, this.containerArchitecture.ToString());
-            Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_IMAGE, this.Image);
 
             // Set path translation variables for DockerProcessManager
             Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_PACKAGES_HOST, platformSpecifics.PackagesDirectory);
