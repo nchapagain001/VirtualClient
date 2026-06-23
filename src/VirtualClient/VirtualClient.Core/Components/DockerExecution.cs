@@ -157,7 +157,7 @@ namespace VirtualClient
                 {
                     try
                     {
-                        this.Logger?.LogInformation($"Cleaning up Docker container: {this.createdContainerId}");
+                        DockerContainerClient.LogDockerInformation($"Cleaning up Docker container: {this.createdContainerId}");
                         await this.dockerClient.StopContainerAsync(this.createdContainerId, cancellationToken).ConfigureAwait(false);
                         await this.dockerClient.RemoveContainerAsync(this.createdContainerId, cancellationToken).ConfigureAwait(false);
                     }
@@ -178,10 +178,6 @@ namespace VirtualClient
                         Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_STATE_HOST, null);
                         Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_STATE_MOUNT, null);
                     }
-                }
-                else
-                {
-                    this.Logger?.LogInformation("Container cleanup skipped (--keep-container-alive flag is set).");
                 }
             }
 
@@ -252,7 +248,7 @@ namespace VirtualClient
             Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_STATE_HOST, platformSpecifics.StateDirectory);
             Environment.SetEnvironmentVariable(EnvironmentVariable.VC_DOCKER_STATE_MOUNT, "/mnt/state");
 
-            logger?.LogInformation($"Docker container created: {containerId} ({this.containerPlatform}-{this.containerArchitecture})");
+            DockerContainerClient.LogDockerInformation($"Docker container created: {containerId} ({this.containerPlatform}-{this.containerArchitecture})");
             return containerId;
         }
 

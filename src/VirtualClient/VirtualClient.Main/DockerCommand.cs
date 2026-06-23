@@ -150,33 +150,24 @@ namespace VirtualClient
                 throw new WorkloadException(errorMessage, ErrorReason.InvalidProfileDefinition);
             }
 
-            // Create a new Actions array with DockerExecution wrapping the original actions.
-            // Any LinuxPackageInstallation dependencies are moved into the container so packages
-            // are installed inside the container rather than on the host.
+            // Create a new Actions array with DockerExecution wrapping all dependencies and actions.
+            // All dependencies and actions run inside the container for complete encapsulation.
             JsonArray newActions = new JsonArray();
-
             JsonArray dockerComponents = new JsonArray();
 
-            // Move LinuxPackageInstallation dependencies into the container components (run first, before actions).
+            // Move all dependencies into the container components (run first, before actions).
             if (profileNode["Dependencies"] is JsonArray dependenciesArray)
             {
-                List<int> indicesToRemove = new List<int>();
-                for (int i = 0; i < dependenciesArray.Count; i++)
+                foreach (JsonNode dependency in dependenciesArray)
                 {
-                    if (dependenciesArray[i] is JsonObject depObj &&
-                        string.Equals(depObj["Type"]?.GetValue<string>(), "LinuxPackageInstallation", StringComparison.OrdinalIgnoreCase))
-                    {
-                        dockerComponents.Add(depObj.DeepClone());
-                        indicesToRemove.Add(i);
-                    }
+                    dockerComponents.Add(dependency.DeepClone());
                 }
 
-                for (int i = indicesToRemove.Count - 1; i >= 0; i--)
-                {
-                    dependenciesArray.RemoveAt(indicesToRemove[i]);
-                }
+                // Clear dependencies array after moving to container
+                profileNode["Dependencies"] = new JsonArray();
             }
 
+            // Move all actions into the container components (run after dependencies).
             foreach (JsonNode action in actionsArray)
             {
                 dockerComponents.Add(action.DeepClone());
@@ -199,7 +190,7 @@ namespace VirtualClient
             profileNode["Actions"] = newActions;
 
             // Write the modified profile to a temporary location
-            string tempProfileName = $"{Path.GetFileNameWithoutExtension(profileRef.ProfileName)}_docker_wrapped.json";
+            string tempProfileName = $"{Path.GetFileNameWithoutExtension(profileRef.ProfileName)}_DockerExecution_wrapped.json";
             string tempProfilePath = Path.Combine(
                 platformSpecifics.ProfilesDirectory,
                 tempProfileName);
@@ -218,7 +209,7 @@ namespace VirtualClient
         /// </summary>
         private async Task EnsureDockerInstalledAndRunningAsync(ILogger logger, CancellationTokenSource cancellationTokenSource)
         {
-            logger?.LogInformation("Checking Docker availability...");
+            DockerContainerClient.LogDockerInformation("Checking Docker availability...");
             bool dockerAvailable = await this.dockerClient.IsDockerAvailableAsync(cancellationTokenSource.Token).ConfigureAwait(false);
 
             if (!dockerAvailable)
@@ -228,7 +219,7 @@ namespace VirtualClient
                     ErrorReason.InvalidProfileDefinition);
             }
 
-            logger?.LogInformation("Docker is available and running.");
+            DockerContainerClient.LogDockerInformation("Docker is available and running.");
         }
 
         /// <summary>
@@ -245,10 +236,10 @@ namespace VirtualClient
                     return;
                 }
 
-                logger?.LogInformation($"Cleaning up Docker container: {containerId}");
+                DockerContainerClient.LogDockerInformation($"Cleaning up Docker container: {containerId}");
                 await this.dockerClient.StopContainerAsync(containerId, cancellationTokenSource.Token).ConfigureAwait(false);
                 await this.dockerClient.RemoveContainerAsync(containerId, cancellationTokenSource.Token).ConfigureAwait(false);
-                logger?.LogInformation($"Docker container cleanup completed.");
+                DockerContainerClient.LogDockerInformation($"Docker container cleanup completed.");
             }
             catch (Exception ex)
             {

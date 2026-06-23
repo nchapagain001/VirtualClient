@@ -33,57 +33,41 @@ namespace VirtualClient.Common.Docker
         }
 
         /// <summary>
-        /// Checks if a Docker image exists locally.
-        /// </summary>
-        public async Task<bool> ImageExistsAsync(string imageName, CancellationToken cancellationToken)
-        {
-            try
-            {
-                DockerCommandResult result = await this.ExecuteDockerCommandAsync($"image inspect {imageName}", null, cancellationToken).ConfigureAwait(false);
-                return result.ExitCode == 0;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Builds a Docker image from a Dockerfile.
-        /// </summary>
-        public async Task BuildImageAsync(string buildContext, string dockerfileName, string imageName, CancellationToken cancellationToken)
-        {
-            string dockerfilePath = Path.Combine(buildContext, dockerfileName);
-            string arguments = $"build -f \"{dockerfilePath}\" -t {imageName} \"{buildContext}\"";
-
-            DockerCommandResult result = await this.ExecuteDockerCommandAsync(arguments, buildContext, cancellationToken).ConfigureAwait(false);
-
-            if (result.ExitCode != 0)
-            {
-                throw new InvalidOperationException(
-                    $"Failed to build Docker image '{imageName}'. Error: {result.StandardError}");
-            }
-        }
-
-        /// <summary>
         /// Checks if Docker is available and running on the system.
         /// </summary>
         public async Task<bool> IsDockerAvailableAsync(CancellationToken cancellationToken)
         {
             try
             {
-                DockerCommandResult result = await this.ExecuteDockerCommandAsync("version", null, cancellationToken).ConfigureAwait(false);
+                CommandResult result = await this.ExecuteCommandAsync(DockerCommand, "version", null, cancellationToken).ConfigureAwait(false);
                 if (result.ExitCode == 0)
                 {
                     return true;
                 }
 
                 // If regular docker command fails, try with sudo (for newly added docker group members)
-                return await this.ExecuteDockerWithSudoAsync("version", cancellationToken).ConfigureAwait(false);
+                result = await this.ExecuteCommandAsync("/bin/bash", "-c \"sudo docker version\"", null, cancellationToken).ConfigureAwait(false);
+                return result.ExitCode == 0;
             }
             catch (Exception ex)
             {
                 this.logger?.LogWarning($"Docker availability check failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Checks if a Docker image exists locally.
+        /// </summary>
+        public async Task<bool> ImageExistsAsync(string imageName, CancellationToken cancellationToken)
+        {
+            try
+            {
+                CommandResult result = await this.ExecuteCommandAsync(DockerCommand, $"image inspect {imageName}", null, cancellationToken).ConfigureAwait(false);
+                return result.ExitCode == 0;
+            }
+            catch
+            {
                 return false;
             }
         }
@@ -95,7 +79,7 @@ namespace VirtualClient.Common.Docker
             string imageName,
             CancellationToken cancellationToken)
         {
-            DockerCommandResult result = await this.ExecuteDockerCommandAsync($"image inspect {imageName}", null, cancellationToken).ConfigureAwait(false);
+            CommandResult result = await this.ExecuteCommandAsync(DockerCommand, $"image inspect {imageName}", null, cancellationToken).ConfigureAwait(false);
 
             if (result.ExitCode != 0)
             {
@@ -104,6 +88,137 @@ namespace VirtualClient.Common.Docker
             }
 
             return DockerContainerClient.ParsePlatformFromInspectJson(result.StandardOutput);
+        }
+
+        /// <summary>
+        /// Builds a Docker image from a Dockerfile.
+        /// </summary>
+        public async Task BuildImageAsync(string buildContext, string dockerfileName, string imageName, CancellationToken cancellationToken)
+        {
+            string dockerfilePath = Path.Combine(buildContext, dockerfileName);
+            string arguments = $"build -f \"{dockerfilePath}\" -t {imageName} \"{buildContext}\"";
+
+            CommandResult result = await this.ExecuteCommandAsync(DockerCommand, arguments, buildContext, cancellationToken).ConfigureAwait(false);
+
+            if (result.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to build Docker image '{imageName}'. Error: {result.StandardError}");
+            }
+        }
+
+        /// <summary>
+        /// Creates a Docker container from the specified image with volume mounts.
+        /// </summary>
+        public async Task<string> CreateContainerAsync(
+            string image,
+            IDictionary<string, string> volumeMounts,
+            IDictionary<string, string> environmentVariables,
+            CancellationToken cancellationToken)
+        {
+            // Build docker run command with volume mounts and environment variables
+            List<string> arguments = new List<string> { "run", "-d" };
+
+            // Add volume mounts
+            if (volumeMounts != null && volumeMounts.Count > 0)
+            {
+                foreach (KeyValuePair<string, string> mount in volumeMounts)
+                {
+                    arguments.Add("-v");
+                    arguments.Add($"{mount.Key}:{mount.Value}");
+                }
+            }
+
+            // Add environment variables
+            if (environmentVariables != null && environmentVariables.Count > 0)
+            {
+                foreach (KeyValuePair<string, string> env in environmentVariables)
+                {
+                    arguments.Add("-e");
+                    arguments.Add($"{env.Key}={env.Value}");
+                }
+            }
+
+            // Keep container running by default (tail -f /dev/null)
+            arguments.Add(image);
+            arguments.Add("tail");
+            arguments.Add("-f");
+            arguments.Add("/dev/null");
+
+            string argumentsString = string.Join(" ", arguments);
+            
+            DockerContainerClient.LogDockerInformation($"Creating Docker container: docker {argumentsString}");
+
+            CommandResult result = await this.ExecuteCommandAsync(DockerCommand, argumentsString, null, cancellationToken).ConfigureAwait(false);
+
+            if (result.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to create Docker container from image '{image}'. Error: {result.StandardError}");
+            }
+
+            string containerId = result.StandardOutput?.Trim();
+            if (string.IsNullOrWhiteSpace(containerId))
+            {
+                throw new InvalidOperationException("Docker container creation succeeded but no container ID was returned.");
+            }
+
+            return containerId;
+        }
+
+        /// <summary>
+        /// Executes a command inside a running Docker container.
+        /// </summary>
+        public async Task<DockerExecResult> ExecuteInContainerAsync(
+            string containerId,
+            string command,
+            CancellationToken cancellationToken)
+        {
+            string arguments = $"exec {containerId} {command}";
+
+            CommandResult result = await this.ExecuteCommandAsync(DockerCommand, arguments, null, cancellationToken).ConfigureAwait(false);
+
+            return new DockerExecResult
+            {
+                ExitCode = result.ExitCode,
+                StandardOutput = result.StandardOutput,
+                StandardError = result.StandardError,
+                Success = result.ExitCode == 0
+            };
+        }
+
+        /// <summary>
+        /// Stops a running Docker container.
+        /// </summary>
+        public async Task<bool> StopContainerAsync(string containerId, CancellationToken cancellationToken)
+        {
+            try
+            {
+                CommandResult result = await this.ExecuteCommandAsync(DockerCommand, $"stop {containerId}", null, cancellationToken).ConfigureAwait(false);
+                return result.ExitCode == 0;
+            }
+            catch (Exception ex)
+            {
+                this.logger?.LogError($"Failed to stop Docker container {containerId}", ex);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Removes a Docker container.
+        /// </summary>
+        public async Task<bool> RemoveContainerAsync(string containerId, CancellationToken cancellationToken)
+        {
+            try
+            {
+                CommandResult result = await this.ExecuteCommandAsync(DockerCommand, $"rm {containerId}", null, cancellationToken).ConfigureAwait(false);
+                return result.ExitCode == 0;
+            }
+            catch (Exception ex)
+            {
+                this.logger?.LogError($"Failed to remove Docker container {containerId}", ex);
+                return false;
+            }
         }
 
         /// <summary>
@@ -156,130 +271,33 @@ namespace VirtualClient.Common.Docker
         }
 
         /// <summary>
-        /// Creates a Docker container from the specified image with volume mounts.
+        /// Logs Docker command information for debugging purposes.
         /// </summary>
-        public async Task<string> CreateContainerAsync(
-            string image,
-            IDictionary<string, string> volumeMounts,
-            IDictionary<string, string> environmentVariables,
-            CancellationToken cancellationToken)
+        public static void LogDockerInformation(string? message, params object?[] args)
         {
-            // Build docker run command with volume mounts and environment variables
-            List<string> arguments = new List<string> { "run", "-d" };
-
-            // Add volume mounts
-            if (volumeMounts != null && volumeMounts.Count > 0)
-            {
-                foreach (KeyValuePair<string, string> mount in volumeMounts)
-                {
-                    arguments.Add("-v");
-                    arguments.Add($"{mount.Key}:{mount.Value}");
-                }
-            }
-
-            // Add environment variables
-            if (environmentVariables != null && environmentVariables.Count > 0)
-            {
-                foreach (KeyValuePair<string, string> env in environmentVariables)
-                {
-                    arguments.Add("-e");
-                    arguments.Add($"{env.Key}={env.Value}");
-                }
-            }
-
-            // Keep container running by default (tail -f /dev/null)
-            arguments.Add(image);
-            arguments.Add("tail");
-            arguments.Add("-f");
-            arguments.Add("/dev/null");
-
-            string argumentsString = string.Join(" ", arguments);
-            this.logger?.LogInformation($"Creating Docker container: docker {argumentsString}");
-
-            DockerCommandResult result = await this.ExecuteDockerCommandAsync(argumentsString, null, cancellationToken).ConfigureAwait(false);
-
-            if (result.ExitCode != 0)
-            {
-                throw new InvalidOperationException(
-                    $"Failed to create Docker container from image '{image}'. Error: {result.StandardError}");
-            }
-
-            string containerId = result.StandardOutput?.Trim();
-            if (string.IsNullOrWhiteSpace(containerId))
-            {
-                throw new InvalidOperationException("Docker container creation succeeded but no container ID was returned.");
-            }
-
-            this.logger?.LogInformation($"Docker container created successfully. Container ID: {containerId}");
-            return containerId;
-        }
-
-        /// <summary>
-        /// Executes a command inside a running Docker container.
-        /// </summary>
-        public async Task<DockerExecResult> ExecuteInContainerAsync(
-            string containerId,
-            string command,
-            CancellationToken cancellationToken)
-        {
-            string arguments = $"exec {containerId} {command}";
-
-            DockerCommandResult result = await this.ExecuteDockerCommandAsync(arguments, null, cancellationToken).ConfigureAwait(false);
-
-            return new DockerExecResult
-            {
-                ExitCode = result.ExitCode,
-                StandardOutput = result.StandardOutput,
-                StandardError = result.StandardError,
-                Success = result.ExitCode == 0
-            };
-        }
-
-        /// <summary>
-        /// Stops a running Docker container.
-        /// </summary>
-        public async Task<bool> StopContainerAsync(string containerId, CancellationToken cancellationToken)
-        {
+            Console.ForegroundColor = ConsoleColor.Blue;
             try
             {
-                DockerCommandResult result = await this.ExecuteDockerCommandAsync($"stop {containerId}", null, cancellationToken).ConfigureAwait(false);
-                return result.ExitCode == 0;
+                Console.WriteLine(message, args);
             }
-            catch (Exception ex)
+            finally
             {
-                this.logger?.LogError($"Failed to stop Docker container {containerId}", ex);
-                return false;
+                Console.ResetColor();
             }
         }
 
         /// <summary>
-        /// Removes a Docker container.
+        /// Executes a process with the specified command and arguments.
         /// </summary>
-        public async Task<bool> RemoveContainerAsync(string containerId, CancellationToken cancellationToken)
-        {
-            try
-            {
-                DockerCommandResult result = await this.ExecuteDockerCommandAsync($"rm {containerId}", null, cancellationToken).ConfigureAwait(false);
-                return result.ExitCode == 0;
-            }
-            catch (Exception ex)
-            {
-                this.logger?.LogError($"Failed to remove Docker container {containerId}", ex);
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Executes a docker command and returns the result.
-        /// </summary>
-        private async Task<DockerCommandResult> ExecuteDockerCommandAsync(
+        private async Task<CommandResult> ExecuteCommandAsync(
+            string fileName,
             string arguments,
             string workingDirectory,
             CancellationToken cancellationToken)
         {
             ProcessStartInfo processInfo = new ProcessStartInfo
             {
-                FileName = DockerCommand,
+                FileName = fileName,
                 Arguments = arguments,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -299,13 +317,12 @@ namespace VirtualClient.Common.Docker
 
                 await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
 
-                // Wait for process exit asynchronously to satisfy AsyncFixer
                 while (!process.HasExited)
                 {
                     await Task.Delay(100, cancellationToken).ConfigureAwait(false);
                 }
 
-                return new DockerCommandResult
+                return new CommandResult
                 {
                     ExitCode = process.ExitCode,
                     StandardOutput = stdoutTask.Result,
@@ -319,55 +336,9 @@ namespace VirtualClient.Common.Docker
         }
 
         /// <summary>
-        /// Executes a docker command with sudo and returns true if successful.
+        /// Result of a command execution.
         /// </summary>
-        private async Task<bool> ExecuteDockerWithSudoAsync(string arguments, CancellationToken cancellationToken)
-        {
-            try
-            {
-                ProcessStartInfo processInfo = new ProcessStartInfo
-                {
-                    FileName = "/bin/bash",
-                    Arguments = $"-c \"sudo docker {arguments}\"",
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-
-                Process process = new Process { StartInfo = processInfo };
-
-                try
-                {
-                    process.Start();
-
-                    Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
-                    Task<string> stderrTask = process.StandardError.ReadToEndAsync();
-
-                    await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
-
-                    while (!process.HasExited)
-                    {
-                        await Task.Delay(100, cancellationToken).ConfigureAwait(false);
-                    }
-
-                    return process.ExitCode == 0;
-                }
-                finally
-                {
-                    process?.Dispose();
-                }
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Result of a Docker command execution.
-        /// </summary>
-        private class DockerCommandResult
+        private class CommandResult
         {
             /// <summary>
             /// Gets or sets the exit code from the command execution.
