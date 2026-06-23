@@ -131,6 +131,13 @@ namespace VirtualClient.Common.Telemetry
             context.ThrowIfNull(nameof(context));
             key.ThrowIfNull(nameof(key));
 
+            // Sanitize null values to prevent JSON serialization issues (e.g., in EventHubTelemetryLogger).
+            // Convert null to empty string as a safe default to prevent NullReferenceException during telemetry transmission.
+            if (value is null)
+            {
+                value = string.Empty;
+            }
+
             context.Properties[key] = value;
             return context;
         }

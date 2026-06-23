@@ -224,6 +224,56 @@ namespace VirtualClient.Contracts
         /// Name = VC_TEMP_DIR
         /// </summary>
         public const string VC_TEMP_DIR = nameof(VC_TEMP_DIR);
+
+        /// <summary>
+        /// Name = VC_DOCKER_CONTAINER_ID. The ID of the Docker container in which the workload is running.
+        /// </summary>
+        public const string VC_DOCKER_CONTAINER_ID = nameof(VC_DOCKER_CONTAINER_ID);
+
+        /// <summary>
+        /// Name = VC_DOCKER_PLATFORM. The detected platform/OS of the Docker container (e.g., Unix, Win32NT).
+        /// </summary>
+        public const string VC_DOCKER_PLATFORM = nameof(VC_DOCKER_PLATFORM);
+
+        /// <summary>
+        /// Name = VC_DOCKER_ARCH. The detected architecture of the Docker container (e.g., X64, Arm64).
+        /// </summary>
+        public const string VC_DOCKER_ARCH = nameof(VC_DOCKER_ARCH);
+
+        /// <summary>
+        /// Name = VC_DOCKER_IMAGE. The Docker image name/tag used for the container.
+        /// </summary>
+        public const string VC_DOCKER_IMAGE = nameof(VC_DOCKER_IMAGE);
+
+        /// <summary>
+        /// Name = VC_DOCKER_PACKAGES_HOST. The host directory path where packages are stored.
+        /// </summary>
+        public const string VC_DOCKER_PACKAGES_HOST = nameof(VC_DOCKER_PACKAGES_HOST);
+
+        /// <summary>
+        /// Name = VC_DOCKER_PACKAGES_MOUNT. The container mount point where host packages directory is mounted.
+        /// </summary>
+        public const string VC_DOCKER_PACKAGES_MOUNT = nameof(VC_DOCKER_PACKAGES_MOUNT);
+
+        /// <summary>
+        /// Name = VC_DOCKER_LOGS_HOST. The host directory path where logs are stored.
+        /// </summary>
+        public const string VC_DOCKER_LOGS_HOST = nameof(VC_DOCKER_LOGS_HOST);
+
+        /// <summary>
+        /// Name = VC_DOCKER_LOGS_MOUNT. The container mount point where host logs directory is mounted.
+        /// </summary>
+        public const string VC_DOCKER_LOGS_MOUNT = nameof(VC_DOCKER_LOGS_MOUNT);
+
+        /// <summary>
+        /// Name = VC_DOCKER_STATE_HOST. The host directory path where state is stored.
+        /// </summary>
+        public const string VC_DOCKER_STATE_HOST = nameof(VC_DOCKER_STATE_HOST);
+
+        /// <summary>
+        /// Name = VC_DOCKER_STATE_MOUNT. The container mount point where host state directory is mounted.
+        /// </summary>
+        public const string VC_DOCKER_STATE_MOUNT = nameof(VC_DOCKER_STATE_MOUNT);
     }
 
     /// <summary>

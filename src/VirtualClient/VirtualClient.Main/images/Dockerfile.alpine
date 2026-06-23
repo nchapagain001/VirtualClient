@@ -1,0 +1,11 @@
+FROM alpine:latest
+
+# gcompat provides a glibc compatibility layer over musl.
+# Required to run linux-x64 binaries (compiled against glibc) on Alpine.
+RUN apk add --no-cache gcompat
+
+VOLUME /mnt/packages
+VOLUME /mnt/logs
+VOLUME /mnt/state
+
+CMD ["tail", "-f", "/dev/null"]

@@ -121,7 +121,7 @@ namespace VirtualClient.Contracts
         /// <summary>
         /// The CPU architecture (e.g. x64, arm64).
         /// </summary>
-        public Architecture CpuArchitecture { get; }
+        public virtual Architecture CpuArchitecture { get; }
 
         /// <summary>
         /// The current/working directory for the application.
@@ -151,13 +151,13 @@ namespace VirtualClient.Contracts
         /// <summary>
         /// The OS platform (e.g. Windows, Unix).
         /// </summary>
-        public PlatformID Platform { get; }
+        public virtual PlatformID Platform { get; }
 
         /// <summary>
         /// The name of the platform + architecture name for the system on which Virtual Client
         /// is running (e.g. win-x64, win-arm64, linux-x64, linux-arm64).
         /// </summary>
-        public string PlatformArchitectureName { get; }
+        public virtual string PlatformArchitectureName { get; }
 
         /// <summary>
         /// The directory where scripts related to workloads exist.

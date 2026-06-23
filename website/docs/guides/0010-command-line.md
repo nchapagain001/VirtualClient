@@ -6,6 +6,7 @@ The following sections describe the command line options available on the Virtua
   * [api](#api)
   * [bootstrap](#bootstrap)
   * [convert](#convert)
+  * [docker](#docker)
   * [get-token](#get-token)
   * [upload-files](#upload-files)
   * [upload-telemetry](#upload-telemetry)
@@ -326,6 +327,87 @@ The following tables describe the various subcommands that are supported by the 
   # Convert a YAML profile to JSON format
   # (e.g. S:\Users\Any\Profiles\PERF-CPU-OPENSSL.yml to S:\Users\Any\Profiles\PERF-CPU-OPENSSL.json)
   VirtualClient.exe convert --profile=S:\Users\Any\Profiles\PERF-CPU-OPENSSL.yml --output-path=S:\Users\Any\Profiles
+  ```
+
+* ### docker
+  Command is used to execute workload profiles inside Docker containers. The container is created and managed automatically—profiles run unchanged, with zero modifications needed. Docker is auto-installed if not available.
+
+  See [Docker Integration](./0500-docker-integration.md) for usage guide.
+
+  | Option                                                    | Required    | Data Type                    | Description |
+  |-----------------------------------------------------------|-------------|------------------------------|-------------|
+  | --profile=\<profile\>                                     | Yes         | string/path                  | The execution profile to run inside the Docker container. Any profile works (no modifications needed). |
+  | --image=\<imageName\>                                     | Yes         | string                       | The Docker image to use for container execution (e.g., ubuntu:noble, alpine:latest, redis:7.0-alpine). Supports both public registry images and VC-certified images (vc-ubuntu:noble, vc-alpine:latest). |
+  | --iterations=\<count\>                                    | No          | integer                      | Number of iterations/rounds of profile actions to execute. Default = 1 |
+  | --timeout=\<mins_or_timespan\>                            | No          | timespan or integer          | How long the container should run before timing out (e.g., 1440, 01:00:00). |
+  | --keep-container-alive                                    | No          | boolean flag                 | If set, the container remains running after execution for manual inspection/debugging. Useful for troubleshooting. Default = false (container is removed after execution). |
+  | --layout, --layout-path=\<definition\|path\>             | No          | string/path                  | Environment layout definition or path for client/server topologies. See [Client/Server Support](./0020-client-server.md). |
+  | --parameters=\<key=value,,,key=value...\>                | No          | string/text                  | Parameters to pass to the profile. Each entry should be a key/value pair separated by ",,," or "," or ";".<br/><br/>e.g.<br/><ul><li>--parameters="Duration=00:05:00,,,Scenario=SHA256"</li></ul><mark>Always surround parameter values with quotation marks.</mark> |
+  | --client-id=\<id\>                                        | No          | string/text                  | Identifier to uniquely identify the instance (telemetry correlation). |
+  | --clean, --clean=\<target,target...\>                    | No          | string                       | Clean files before execution (logs, packages, state, temp, or all). |
+  | --experiment-id=\<guid\>                                  | No          | guid                         | Experiment identifier for telemetry correlation. |
+  | --content, --content-store=\<connection\>                | No          | string/connection string/SAS | Storage connection for uploading files/content (e.g., logs). |
+  | --event-hub=\<connection\>                                | No          | string/connection string     | Event Hub connection for telemetry upload. |
+  | --logger=\<reference\>                                    | No          | string/path                  | Logger definitions (e.g., csv, file, summary, eventhub). Multiple loggers can be specified. |
+  | --log-dir=\<path\>                                        | No          | string/path                  | Alternate directory for log files. |
+  | --log-level=\<level\>                                     | No          | integer/string               | Logging severity level (Trace, Debug, Information, Warning, Error, Critical). Default = Information. |
+  | --log-to-file, -l                                        | No          |                              | Write process output to log files. |
+  | --metadata=\<key=value,,,key=value...\>                  | No          | string/text                  | Metadata to include with telemetry. Each entry should be a key/value pair separated by ",,," or "," or ";".<br/><br/><mark>Always surround metadata values with quotation marks.</mark> |
+  | --package-store=\<connection\>                            | No          | string/connection string/SAS | Storage connection for downloading workload packages. Defaults to public VC package store. |
+  | --package-dir=\<path\>                                    | No          | string/path                  | Alternate directory for downloaded packages. |
+  | --system=\<executionSystem\>                              | No          | string/text                  | Execution system/platform identifier (e.g., Azure). |
+  | --exit-wait=\<mins_or_timespan\>                          | No          | timespan or integer          | Time to wait for telemetry flush before exiting. Default = 30 mins. |
+  | -v, --verbose                                             | No          |                              | Verbose console logging (equivalent to `--log-level=Trace`). |
+  | -?, -h, --help                                            | No          |                              | Show help information. |
+  | --version                                                 | No          |                              | Show application version information. |
+
+  ``` bash
+  # Basic example: Run OpenSSL workload in Ubuntu container
+  VirtualClient.exe docker --profile=GET-STARTED-OPENSSL.json --image=ubuntu:noble
+
+  # Use VC-certified Alpine image (auto-built if not found locally)
+  VirtualClient.exe docker --profile=GET-STARTED-OPENSSL.json --image=vc-alpine:latest
+
+  # Run with specific parameters and keep container alive for debugging
+  VirtualClient.exe docker \
+      --profile=PERF-CPU-OPENSSL.json \
+      --image=ubuntu:noble \
+      --iterations=5 \
+      --keep-container-alive=true \
+      --parameters="SHA256Duration=00:05:00"
+
+  # Full command line example with telemetry and logging
+  VirtualClient.exe docker
+      --profile=PERF-CPU-OPENSSL.json
+      --image=ubuntu:noble
+      --iterations=1
+      --client-id=docker-agent-01
+      --experiment-id=b9fd4dce-eb3b-455f-bc81-2a394d1ff849
+      --system=Demo
+      --metadata="Environment=Test,,,Region=EastUS2"
+      --logger=csv
+      --logger=file
+      --logger=summary
+      --log-dir="./logs"
+      --event-hub="sb://anynamespace.servicebus.windows.net?cid=...&tid=..."
+      --package-store="https://packages.virtualclient.microsoft.com"
+      --clean=logs
+      --exit-wait=00:10:00
+      --verbose
+
+  # Debug: Inspect container after execution
+  VirtualClient.exe docker \
+      --profile=GET-STARTED-OPENSSL.json \
+      --image=ubuntu:noble \
+      --keep-container-alive=true
+  
+  # Then in another terminal:
+  # docker exec -it {container_id} bash
+  # ls -la /mnt/packages
+  # cat /mnt/logs/output.log
+
+  # Clean container when done
+  # docker stop {container_id} && docker rm {container_id}
   ```
 
 * ### get-token

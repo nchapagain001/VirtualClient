@@ -55,6 +55,17 @@
 
         <Copy SourceFiles="@(ProfileFiles)" DestinationFiles="@(ProfileFiles->'$(OutputPath)profiles\%(RecursiveDir)%(Filename)%(Extension)')" />
     </Target>
+
+    <!--
+    Copies the Docker images directory into the target output directory.
+    -->
+    <Target Name="CopyImagesToOutputDirectory" AfterTargets="Build">
+        <ItemGroup>
+            <ImageFiles Include="images\**\*" />
+        </ItemGroup>
+
+        <Copy SourceFiles="@(ImageFiles)" DestinationFiles="@(ImageFiles->'$(OutputPath)images\%(RecursiveDir)%(Filename)%(Extension)')" />
+    </Target>
     
     <!--
     Copies script/content files into the target output directory.

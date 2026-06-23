@@ -1,0 +1,11 @@
+FROM ubuntu:noble
+
+# No workload packages needed.
+# All workload binaries arrive via /mnt/packages volume mount from the host.
+# glibc (required by linux-x64 binaries) is already included in ubuntu:noble.
+
+VOLUME /mnt/packages
+VOLUME /mnt/logs
+VOLUME /mnt/state
+
+CMD ["tail", "-f", "/dev/null"]
