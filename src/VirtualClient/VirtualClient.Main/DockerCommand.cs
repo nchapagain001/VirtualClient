@@ -9,12 +9,14 @@ namespace VirtualClient
     using System.IO;
     using System.Linq;
     using System.Runtime.InteropServices;
+    using System.Text.Encodings.Web;
     using System.Text.Json;
     using System.Text.Json.Nodes;
     using System.Threading;
     using System.Threading.Tasks;
     using Microsoft.Extensions.DependencyInjection;
     using Microsoft.Extensions.Logging;
+    using Newtonsoft.Json;
     using VirtualClient.Common.Docker;
     using VirtualClient.Common.Extensions;
     using VirtualClient.Common.Telemetry;
@@ -77,8 +79,32 @@ namespace VirtualClient
             this.dockerClient = new DockerContainerClient(logger);
             await this.EnsureDockerInstalledAndRunningAsync(logger, cancellationTokenSource).ConfigureAwait(false);
 
-            // Wrap profile actions with DockerExecution component, leaving dependencies unchanged.
-            this.WrapProfileActionsWithDockerExecution(platformSpecifics);
+            // Load and wrap profile before execution
+            DependencyProfileReference profileRef = this.Profiles.First();
+            string profilePath = Path.Combine(platformSpecifics.ProfilesDirectory, profileRef.ProfileName);
+
+            if (!File.Exists(profilePath))
+            {
+                throw new WorkloadException(
+                    $"Profile not found at path: {profilePath}",
+                    ErrorReason.InvalidProfileDefinition);
+            }
+
+            ExecutionProfile profile = await ExecutionProfile.ReadProfileAsync(profilePath).ConfigureAwait(false);
+            ExecutionProfile wrappedProfile = this.WrapProfileActionsWithDockerExecution(profile);
+
+            // Save wrapped profile
+            string tempProfileName = $"{Path.GetFileNameWithoutExtension(profileRef.ProfileName)}_DockerExecution_wrapped.json";
+            string tempProfilePath = Path.Combine(platformSpecifics.ProfilesDirectory, tempProfileName);
+
+            string wrappedJson = JsonConvert.SerializeObject(wrappedProfile, Formatting.Indented);
+            File.WriteAllText(tempProfilePath, wrappedJson);
+
+            // Update this.Profiles to use the wrapped profile
+            this.Profiles = new List<DependencyProfileReference>
+            {
+                new DependencyProfileReference(tempProfileName)
+            };
 
             try
             {
@@ -97,51 +123,82 @@ namespace VirtualClient
         }
 
         /// <summary>
-        /// Wraps the loaded profile's actions with a DockerExecution component.
+        /// Wraps the loaded profile's dependencies and actions in separate DockerExecution components.
+        /// Dependencies run in the first DockerExecution (creating the container).
+        /// Actions run in the second DockerExecution (reusing the same container).
         /// </summary>
-        private void WrapProfileActionsWithDockerExecution(PlatformSpecifics platformSpecifics)
+        protected ExecutionProfile WrapProfileActionsWithDockerExecution(ExecutionProfile profile)
         {
-            if (this.Profiles == null || !this.Profiles.Any())
+            if (profile == null || (profile.Dependencies == null && profile.Actions == null))
             {
-                return;
+                return profile;
             }
 
-            DependencyProfileReference profileRef = this.Profiles.First();
-            string profilePath = Path.Combine(
-                platformSpecifics.ProfilesDirectory,
-                profileRef.ProfileName);
+            this.ValidateProfileForDocker(profile);
 
-            if (!File.Exists(profilePath))
+            // Create Docker parameters shared by both wrappers
+            IDictionary<string, IConvertible> dockerParameters = new Dictionary<string, IConvertible>
             {
-                throw new WorkloadException(
-                    $"Profile not found at path: {profilePath}",
-                    ErrorReason.InvalidProfileDefinition);
+                ["Image"] = this.DockerImage,
+                ["DeferContainerCleanup"] = true
+            };
+
+            // Wrap dependencies and actions separately
+            List<ExecutionProfileElement> wrappedDependencies = new List<ExecutionProfileElement>();
+            List<ExecutionProfileElement> wrappedActions = new List<ExecutionProfileElement>();
+
+            if (profile.Dependencies?.Any() == true)
+            {
+                ExecutionProfileElement dependencyWrapper = new ExecutionProfileElement(
+                    type: "DockerExecution",
+                    parameters: dockerParameters,
+                    components: profile.Dependencies);
+
+                wrappedDependencies.Add(dependencyWrapper);
             }
 
-            string profileJson = File.ReadAllText(profilePath);
-            JsonNode profileNode = JsonNode.Parse(profileJson);
-
-            if (profileNode?["Actions"] is not JsonArray actionsArray)
+            if (profile.Actions?.Any() == true)
             {
-                throw new WorkloadException(
-                    $"Profile '{profileRef.ProfileName}' does not contain an Actions array.",
-                    ErrorReason.InvalidProfileDefinition);
+                ExecutionProfileElement actionWrapper = new ExecutionProfileElement(
+                    type: "DockerExecution",
+                    parameters: dockerParameters,
+                    components: profile.Actions);
+
+                wrappedActions.Add(actionWrapper);
             }
 
-            // Detect nested DockerExecution: if the profile already contains a DockerExecution action,
-            // running the 'docker' subcommand would create a double-docker scenario.
-            bool hasDockerExecution = actionsArray
-                .OfType<JsonObject>()
-                .Any(action => string.Equals(
-                    action["Type"]?.GetValue<string>(),
-                    "DockerExecution",
-                    StringComparison.OrdinalIgnoreCase));
+            // Create new profile with wrapped components
+            ExecutionProfile wrappedProfile = new ExecutionProfile(
+                description: profile.Description,
+                minimumExecutionInterval: profile.MinimumExecutionInterval,
+                actions: wrappedActions,
+                dependencies: wrappedDependencies,
+                monitors: profile.Monitors,
+                metadata: profile.Metadata,
+                parameters: profile.Parameters,
+                parametersOn: profile.ParametersOn);
+
+            return wrappedProfile;
+        }
+
+        /// <summary>
+        /// Validates that the profile does not already contain DockerExecution components.
+        /// Throws an exception if DockerExecution is found in dependencies, actions, or monitors.
+        /// </summary>
+        protected void ValidateProfileForDocker(ExecutionProfile profile)
+        {
+            bool hasDockerExecution = (profile.Dependencies?.Any(d =>
+                    string.Equals(d.Type, "DockerExecution", StringComparison.OrdinalIgnoreCase)) == true) ||
+                   (profile.Actions?.Any(a =>
+                    string.Equals(a.Type, "DockerExecution", StringComparison.OrdinalIgnoreCase)) == true) ||
+                   (profile.Monitors?.Any(m =>
+                    string.Equals(m.Type, "DockerExecution", StringComparison.OrdinalIgnoreCase)) == true);
 
             if (hasDockerExecution)
             {
                 string errorMessage =
-                    $"Profile '{profileRef.ProfileName}' already contains a 'DockerExecution' action. " +
-                    $"The 'docker' subcommand wraps profile actions in DockerExecution automatically. " +
+                    $"The provided profile already contains a 'DockerExecution' component. " +
+                    $"The 'docker' subcommand wraps profile components in DockerExecution automatically. " +
                     $"Either use the 'docker' subcommand with a standard profile (e.g. GET-STARTED-OPENSSL.json), " +
                     $"or run the profile directly without the 'docker' subcommand (e.g. VirtualClient.exe --profile=GET-STARTED-OPENSSL-DOCKER.json).";
 
@@ -149,59 +206,6 @@ namespace VirtualClient
 
                 throw new WorkloadException(errorMessage, ErrorReason.InvalidProfileDefinition);
             }
-
-            // Create a new Actions array with DockerExecution wrapping all dependencies and actions.
-            // All dependencies and actions run inside the container for complete encapsulation.
-            JsonArray newActions = new JsonArray();
-            JsonArray dockerComponents = new JsonArray();
-
-            // Move all dependencies into the container components (run first, before actions).
-            if (profileNode["Dependencies"] is JsonArray dependenciesArray)
-            {
-                foreach (JsonNode dependency in dependenciesArray)
-                {
-                    dockerComponents.Add(dependency.DeepClone());
-                }
-
-                // Clear dependencies array after moving to container
-                profileNode["Dependencies"] = new JsonArray();
-            }
-
-            // Move all actions into the container components (run after dependencies).
-            foreach (JsonNode action in actionsArray)
-            {
-                dockerComponents.Add(action.DeepClone());
-            }
-
-            JsonObject dockerExecutionAction = new JsonObject
-            {
-                ["Type"] = "DockerExecution",
-                ["Parameters"] = new JsonObject
-                {
-                    ["Image"] = this.DockerImage,
-                    ["DeferContainerCleanup"] = true
-                },
-                ["Components"] = dockerComponents
-            };
-
-            newActions.Add(dockerExecutionAction);
-
-            // Replace the profile's Actions with the wrapped version
-            profileNode["Actions"] = newActions;
-
-            // Write the modified profile to a temporary location
-            string tempProfileName = $"{Path.GetFileNameWithoutExtension(profileRef.ProfileName)}_DockerExecution_wrapped.json";
-            string tempProfilePath = Path.Combine(
-                platformSpecifics.ProfilesDirectory,
-                tempProfileName);
-
-            File.WriteAllText(tempProfilePath, profileNode.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-
-            // Update this.Profiles to use the wrapped profile
-            this.Profiles = new List<DependencyProfileReference>
-            {
-                new DependencyProfileReference(tempProfileName)
-            };
         }
 
         /// <summary>
