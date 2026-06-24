@@ -57,6 +57,31 @@ namespace VirtualClient.Common.Docker
         }
 
         /// <summary>
+        /// Checks if Hyper-V is enabled on Windows.
+        /// </summary>
+        public async Task<bool> IsHyperVEnabledAsync(CancellationToken cancellationToken)
+        {
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                return false;
+            }
+
+            try
+            {
+                CommandResult result = await this.ExecuteCommandAsync(
+                    "powershell",
+                    "$feature = Get-WindowsOptionalFeature -Online -FeatureName Hyper-V; if ($feature.State -eq 'Enabled') { exit 0 } else { exit 1 }",
+                    null,
+                    cancellationToken).ConfigureAwait(false);
+                return result.ExitCode == 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
         /// Checks if a Docker image exists locally.
         /// </summary>
         public async Task<bool> ImageExistsAsync(string imageName, CancellationToken cancellationToken)

@@ -12,6 +12,7 @@ namespace VirtualClient.Dependencies
     using Microsoft.Extensions.Logging;
     using Polly;
     using VirtualClient.Common;
+    using VirtualClient.Common.Docker;
     using VirtualClient.Common.Extensions;
     using VirtualClient.Common.Telemetry;
     using VirtualClient.Contracts;
@@ -29,6 +30,7 @@ namespace VirtualClient.Dependencies
         private ISystemManagement systemManager;
         private IStateManager stateManager;
         private string dockerScriptPath;
+        private DockerContainerClient dockerClient;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="DockerInstallation"/> class.
@@ -41,6 +43,9 @@ namespace VirtualClient.Dependencies
             this.RetryPolicy = Policy.Handle<Exception>().WaitAndRetryAsync(5, (retries) => TimeSpan.FromSeconds(retries + 1));
             this.systemManager = dependencies.GetService<ISystemManagement>();
             this.stateManager = dependencies.GetService<IStateManager>();
+
+            ILogger logger = dependencies.GetService<ILogger>();
+            this.dockerClient = new DockerContainerClient(logger);
         }
 
         /// <summary>
@@ -164,42 +169,14 @@ namespace VirtualClient.Dependencies
             }
         }
 
-        private async Task<bool> IsHyperVEnabledAsync(CancellationToken cancellationToken)
+        private Task<bool> IsHyperVEnabledAsync(CancellationToken cancellationToken)
         {
-            string scriptPath = Path.Combine(this.DockerScriptPath, "check-hyperv-enabled.ps1");
-            int exitCode = await this.CallPowerShellAndGetExitCode(scriptPath, cancellationToken).ConfigureAwait(false);
-            return exitCode == 0;
+            return this.dockerClient.IsHyperVEnabledAsync(cancellationToken);
         }
 
-        private async Task<bool> IsDockerInstalledAsync(CancellationToken cancellationToken)
+        private Task<bool> IsDockerInstalledAsync(CancellationToken cancellationToken)
         {
-            try
-            {
-                // Check if Docker daemon is functional with retry logic
-                int maxRetries = 3;
-                for (int i = 0; i < maxRetries; i++)
-                {
-                    using (IProcessProxy process = this.systemManager.ProcessManager.CreateProcess("docker", "ps"))
-                    {
-                        await process.StartAndWaitAsync(cancellationToken).ConfigureAwait(false);
-                        if (process.ExitCode == 0)
-                        {
-                            return true;
-                        }
-                        else
-                        {
-                            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
-                        }
-                    }
-                }
-
-                return false;
-            }
-            catch (Exception ex)
-            {
-                this.Logger?.LogWarning($"Docker installation check failed: {ex.Message}");
-                return false;
-            }
+            return this.dockerClient.IsDockerAvailableAsync(cancellationToken);
         }
 
         private async Task InstallDockerOnWindowsAsync(EventContext telemetryContext, CancellationToken cancellationToken)
@@ -227,10 +204,8 @@ namespace VirtualClient.Dependencies
                 }
             }
 
-            await this.CallPowerShell(Path.Combine(this.DockerScriptPath, "install-wsl2.ps1"), telemetryContext, cancellationToken).ConfigureAwait(false);
-            await this.CallPowerShell(Path.Combine(this.DockerScriptPath, "install-docker-daemon.ps1"), telemetryContext, cancellationToken).ConfigureAwait(false);
+            await this.CallPowerShell(Path.Combine(this.DockerScriptPath, "install-wsl2-docker.ps1"), telemetryContext, cancellationToken).ConfigureAwait(false);
             await this.CallPowerShell(Path.Combine(this.DockerScriptPath, "configure-docker-autostart.ps1"), telemetryContext, cancellationToken).ConfigureAwait(false);
-            await this.CallPowerShell(Path.Combine(this.DockerScriptPath, "verify-docker.ps1"), telemetryContext, cancellationToken).ConfigureAwait(false);
         }
 
         private string GetDockerDesktopExePath()
@@ -267,25 +242,14 @@ namespace VirtualClient.Dependencies
 
         private async Task InstallDockerOnDebianBasedAsync(EventContext telemetryContext, CancellationToken cancellationToken)
         {
-            await this.CallBashScript(Path.Combine(this.DockerScriptPath, "install-docker-debian.sh"), null, telemetryContext, cancellationToken).ConfigureAwait(false);
-            await this.CallBashScript(Path.Combine(this.DockerScriptPath, "install-docker-packages-debian.sh"), this.Version, telemetryContext, cancellationToken).ConfigureAwait(false);
+            await this.CallBashScript(Path.Combine(this.DockerScriptPath, "install-docker-debian.sh"), this.Version, telemetryContext, cancellationToken).ConfigureAwait(false);
             await this.CallBashScript(Path.Combine(this.DockerScriptPath, "start-docker-daemon.sh"), null, telemetryContext, cancellationToken).ConfigureAwait(false);
         }
 
         private async Task InstallDockerOnRHELBasedAsync(EventContext telemetryContext, CancellationToken cancellationToken)
         {
-            await this.CallBashScript(Path.Combine(this.DockerScriptPath, "install-docker-rhel.sh"), null, telemetryContext, cancellationToken).ConfigureAwait(false);
-            await this.CallBashScript(Path.Combine(this.DockerScriptPath, "install-docker-packages-rhel.sh"), this.Version, telemetryContext, cancellationToken).ConfigureAwait(false);
+            await this.CallBashScript(Path.Combine(this.DockerScriptPath, "install-docker-rhel.sh"), this.Version, telemetryContext, cancellationToken).ConfigureAwait(false);
             await this.CallBashScript(Path.Combine(this.DockerScriptPath, "start-docker-daemon.sh"), null, telemetryContext, cancellationToken).ConfigureAwait(false);
-        }
-
-        private Task ExecuteCommandAsync(
-            string command,
-            string arguments,
-            EventContext telemetryContext,
-            CancellationToken cancellationToken)
-        {
-            return this.ExecuteCommandAsync(command, arguments, null, telemetryContext, cancellationToken);
         }
 
         private Task ExecuteCommandAsync(
@@ -330,24 +294,6 @@ namespace VirtualClient.Dependencies
             return this.ExecuteCommandAsync("powershell", $"-ExecutionPolicy Bypass -File \"{scriptPath}\"", null, telemetryContext, cancellationToken);
         }
 
-        private async Task<int> CallPowerShellAndGetExitCode(string scriptPath, CancellationToken cancellationToken)
-        {
-            try
-            {
-                string arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\"";
-                using (IProcessProxy process = this.systemManager.ProcessManager.CreateProcess("powershell", arguments))
-                {
-                    await process.StartAndWaitAsync(cancellationToken).ConfigureAwait(false);
-                    return process.ExitCode;
-                }
-            }
-            catch (Exception ex)
-            {
-                this.Logger?.LogWarning($"PowerShell script execution failed ({scriptPath}): {ex.Message}");
-                return -1;
-            }
-        }
-
         private Task CallBashScript(string scriptPath, string argument = null, EventContext telemetryContext = null, CancellationToken cancellationToken = default)
         {
             string arguments = string.IsNullOrEmpty(argument) ? scriptPath : $"{scriptPath} {argument}";
@@ -358,23 +304,15 @@ namespace VirtualClient.Dependencies
         {
             try
             {
-                using (IProcessProxy process = this.systemManager.ProcessManager.CreateElevatedProcess(
-                    this.Platform,
-                    "docker",
-                    "version",
-                    null))
+                bool isDockerAvailable = await this.dockerClient.IsDockerAvailableAsync(cancellationToken).ConfigureAwait(false);
+                if (!isDockerAvailable)
                 {
-                    await process.StartAndWaitAsync(cancellationToken).ConfigureAwait(false);
-
-                    if (process.ExitCode != 0)
-                    {
-                        throw new DependencyException(
-                            "Docker verification failed.",
-                            ErrorReason.DependencyInstallationFailed);
-                    }
-
-                    this.Logger?.LogTrace(process.StandardOutput.ToString());
+                    throw new DependencyException(
+                        "Docker verification failed.",
+                        ErrorReason.DependencyInstallationFailed);
                 }
+
+                this.Logger?.LogTrace("Docker verification successful");
             }
             catch (Exception ex)
             {
